@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "cloudviewer-agent values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[a-f0-9]{64}$"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "existingSecret": { "type": "string" },
+    "token": { "type": "string" },
+    "enrollToken": {
+      "$comment": "Reserved for fleet enrollment (specs/12). Accepted by the schema so GA is additive, but the template fails when it is set non-empty.",
+      "type": "string"
+    },
+    "facadeUrl": { "type": "string", "pattern": "^https?://" },
+    "resources": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "nodeSelector": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+    "priorityClassName": { "type": "string" },
+    "global": {
+      "$comment": "Helm's shared-values key; unused by this chart but must not fail validation.",
+      "type": "object"
+    }
+  }
+}

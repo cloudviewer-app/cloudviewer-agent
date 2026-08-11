@@ -1,0 +1,19 @@
+apiVersion: v2
+name: cloudviewer-agent
+# BETA: with today's per-server tokens every node in the DaemonSet reports
+# as the same server — fine for single-node k3s, wrong for a real cluster.
+# GA comes with fleet enrollment (specs/12); see README.md.
+description: Cloud Viewer monitoring agent as a DaemonSet (beta until fleet enrollment ships)
+type: application
+# Chart version, independent of the agent release train; stays 0.x while
+# the chart is beta (§7 of the packaging spec).
+version: 0.1.0
+# The agent/image version this chart deploys by default (<year>.<quarter>.<patch>).
+appVersion: "2026.3.0"
+home: https://cloudviewer.app
+sources:
+  - https://github.com/cloudviewer-app/cloudviewer-agent
+keywords:
+  - monitoring
+  - vector
+  - cloudviewer

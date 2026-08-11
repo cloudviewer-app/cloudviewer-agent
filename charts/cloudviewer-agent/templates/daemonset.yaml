@@ -1,0 +1,105 @@
+{{- /*
+Fail fast on misconfiguration — a template error at install time beats a
+crash-looping DaemonSet at runtime.
+*/}}
+{{- if .Values.enrollToken }}
+{{- fail "enrollToken is reserved for fleet enrollment, which is not available yet. Use existingSecret (a Secret with key \"token\") or token with a per-server agent token from the portal." }}
+{{- end }}
+{{- if and (not .Values.existingSecret) (not .Values.token) }}
+{{- fail "No agent token configured. Set existingSecret to a Secret holding the token under the key \"token\" (recommended), or set token to have the chart create that Secret." }}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cloudviewer-agent.fullname" . }}
+  labels:
+    {{- include "cloudviewer-agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cloudviewer-agent.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    # Default RollingUpdate (maxUnavailable 1): a node's agent is briefly
+    # down during upgrades; Vector's disk buffers in the pod are ephemeral
+    # anyway and the portal tolerates a minute's gap.
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "cloudviewer-agent.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # hostNetwork so the agent reaches the cloud provider's metadata
+      # service (169.254.169.254) for provider detection, and so network
+      # metrics see the node's interfaces (specs/12 §5).
+      # ClusterFirstWithHostNet keeps in-cluster DNS working under
+      # hostNetwork (the default would silently switch to the node's
+      # resolv.conf).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # No serviceAccountName: the agent talks only to the facade, nothing
+      # in-cluster — the default SA with zero RBAC is exactly right.
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "cloudviewer-agent.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Token via file mount, not env secretKeyRef: a file never
+            # shows up in `kubectl describe pod` or crash dumps of the
+            # environment, and rotating the Secret updates the mount.
+            - name: CV_AGENT_TOKEN_FILE
+              value: /var/run/secrets/cloudviewer/token
+            - name: CV_AGENT_FACADE_URL
+              value: {{ .Values.facadeUrl | quote }}
+            # Point Vector's host_metrics at the host's /proc and /sys
+            # (mounted read-only below) instead of the container's own.
+            - name: PROCFS_ROOT
+              value: /host/proc
+            - name: SYSFS_ROOT
+              value: /host/sys
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: token
+              mountPath: /var/run/secrets/cloudviewer
+              readOnly: true
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            # Host root for filesystem/disk metrics (mount usage).
+            - name: root
+              mountPath: /host/root
+              readOnly: true
+      volumes:
+        - name: token
+          secret:
+            secretName: {{ include "cloudviewer-agent.secretName" . }}
+            items:
+              - key: token
+                path: token
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: root
+          hostPath:
+            path: /

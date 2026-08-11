@@ -1,0 +1,60 @@
+# Cloud Viewer agent chart values.
+#
+# Deliberately small (specs/30 §7): the DaemonSet's shape — hostNetwork,
+# read-only host mounts, token via Secret — is fixed, not configurable.
+# Users needing general Vector topologies should use Vector's own chart.
+
+image:
+  # Customer-facing home of the image (specs/30 §6).
+  repository: ghcr.io/cloudviewer-app/cloudviewer-agent
+  # Image tag; empty means "use the chart's appVersion" (the release train
+  # publishes chart and image together, so the default is always coherent).
+  tag: ""
+  # Digest pin, e.g. "sha256:abcd…" — the preferred way to pin (immutable,
+  # survives tag repointing). When set it is used INSTEAD of the tag.
+  digest: ""
+  # IfNotPresent because tags are immutable per release (specs/30 §6).
+  pullPolicy: IfNotPresent
+
+# Name of an existing Secret holding the agent token under the key "token".
+# This is the documented path — the token never lands in values files or
+# Helm release state. Create it with:
+#   kubectl create secret generic cloudviewer-agent --from-literal=token=<token>
+existingSecret: ""
+
+# Convenience for quick starts: when set (and existingSecret is not), the
+# chart creates the Secret itself. Discouraged beyond a first try — the
+# token then lives in your values/history and in Helm's release Secret.
+token: ""
+
+# Reserved for fleet enrollment (specs/12) — NOT YET FUNCTIONAL. The key
+# exists so GA is additive; setting it today makes the install fail with an
+# explanation rather than silently doing the wrong thing.
+enrollToken: ""
+
+# Facade base URL the agent fetches its config from and ships telemetry to.
+facadeUrl: https://api.cloudviewer.app
+
+# Small by design: the agent is one Vector instance doing host metrics.
+# Memory limit only — a CPU limit would throttle collection spikes for no
+# safety gain on a DaemonSet this small.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# Monitoring agents usually want to run everywhere; add e.g. the
+# control-plane NoSchedule toleration here if you want masters covered.
+tolerations: []
+
+# Restrict which nodes run the agent (default: all Linux-schedulable nodes).
+nodeSelector: {}
+
+# Extra annotations for the agent pods (e.g. for policy engines).
+podAnnotations: {}
+
+# PriorityClass for the agent pods; monitoring agents are usually given a
+# high priority so node pressure doesn't evict the thing observing it.
+priorityClassName: ""

@@ -1,0 +1,134 @@
+# CI for the public agent repo. Everything runs on plain `pull_request` —
+# on fork PRs that means no secrets in scope and a read-only token, and
+# that mechanism (not trust) is what makes fork PRs safe to run
+# (docs/github-config.md §3). This workflow must never reference a secret:
+# release credentials exist only in the `release` environment, which only
+# release.yml's build-packages job may use.
+#
+# The payload is POSIX sh that gets piped into `sh` on customer hosts and
+# run by `sh` in the container, so POSIX parsing (`dash -n`) is its own
+# gate alongside shellcheck — same rationale as the monorepo's installer
+# CI. Jobs are parallel and small; the repo is small enough that path
+# filtering would only hide breakage.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: shellcheck + POSIX parse
+        run: |
+          set -eu
+          # Every POSIX sh file a customer host, container, or package
+          # scriptlet ever executes. A fixed list on purpose: a lint gate
+          # that discovers its own inputs can silently lint nothing, and
+          # shellcheck failing on a missing file keeps the list honest.
+          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config agent/libexec/render-config packaging/scripts/postinstall.sh packaging/scripts/preremove.sh packaging/scripts/postremove.sh"
+          for f in packaging/scripts/*; do
+            if [ -f "$f" ]; then scripts="$scripts $f"; fi
+          done
+          for f in $scripts; do
+            echo "== $f"
+            shellcheck --shell=sh "$f"
+            # Piped into / executed by `sh` — POSIX parsing is its own
+            # gate; shellcheck alone lets bashisms through as warnings.
+            dash -n "$f"
+          done
+          # The test harness is bash by design; shellcheck reads the
+          # shebang for the dialect, and dash has no business parsing it.
+          shellcheck tests/run.sh
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: harness (stub facade on loopback)
+        # Self-contained: needs only bash + python3, both preinstalled.
+        run: bash tests/run.sh
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          go-version: stable
+      - name: install nfpm
+        # nfpm: one YAML → deb + rpm (spec 30 D4). Built from source with
+        # `go install` — the module proxy checksum-verifies it — instead of
+        # downloading a release binary this workflow couldn't pin.
+        # TODO(pin): pin an nfpm version (…/nfpm@vX.Y.Z, not @latest) before first release (docs/github-config.md §3)
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+      - name: dry-build deb + rpm
+        env:
+          VERSION: 0.0.0+ci # obviously-not-a-release version; the tag drives real builds
+        run: |
+          mkdir -p dist
+          NFPM="$(go env GOPATH)/bin/nfpm"
+          "$NFPM" package -f packaging/nfpm.yaml --packager deb --target dist/
+          "$NFPM" package -f packaging/nfpm.yaml --packager rpm --target dist/
+          ls -l dist/
+      - name: smoke-check the deb
+        # The package IS the audit surface (spec 30 §3): print control
+        # metadata and the complete file list so a reviewer sees exactly
+        # what a host would get, on every PR.
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+      - uses: actions/upload-artifact@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          name: packages
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: helm lint + template
+        # `token` is the quick-start value that creates the Secret in-chart;
+        # any non-empty dummy makes every template render so the whole
+        # manifest set is exercised. Never a real token — CI has none.
+        run: |
+          helm lint charts/cloudviewer-agent
+          helm template smoke charts/cloudviewer-agent --set token=dummy-ci-token
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: docker build (no push)
+        # Native-arch build only: the image is upstream Vector plus a layer
+        # of the same POSIX scripts lint already covers, so a single-arch
+        # build proves the Dockerfile; release.yml does the multi-arch push.
+        run: docker build -f docker/Dockerfile -t cloudviewer-agent:ci .

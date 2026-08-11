@@ -1,0 +1,356 @@
+# Release pipeline (specs 30 §9): tag push → verify (the same lint+test
+# gate as CI) → nfpm deb/rpm build → GPG sign → static apt/yum repo trees
+# → GitHub Release (packages + SHA256SUMS + SBOMs + provenance
+# attestation) → multi-arch image push → Helm OCI push → dispatch the
+# private monorepo's `get` image rebuild, which is how the signed repo
+# trees and bootstrap land on get.cloudviewer.app.
+#
+# Security shape (docs/github-config.md §3/§4):
+#   * Triggers on tag push only. The `20*` tag ruleset restricts tag
+#     creation to admins, so a tag push — the only thing that can reach
+#     the signing key — is a privileged act.
+#   * Only build-packages declares `environment: release`; the GPG
+#     signing subkey is visible to that one job and nowhere else. The
+#     environment's deployment policy additionally refuses non-`20*` refs.
+#   * Top-level token is read-only; each job escalates only what it needs
+#     (contents:write for the Release, packages:write for ghcr pushes,
+#     id-token/attestations:write for provenance).
+#   * The key in CI is a signing SUBKEY; the master key is offline, so a
+#     leak here is revocable without rotating the published trust root.
+
+name: release
+
+on:
+  push:
+    tags: ["20*"] # <year>.<quarter>.<patch>, e.g. 2026.3.0
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # CI's lint+test, duplicated rather than factored into a reusable
+    # workflow on purpose: someone auditing the release path should see
+    # the complete gate in this one file.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: shellcheck + POSIX parse
+        run: |
+          set -eu
+          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config"
+          for f in packaging/scripts/*; do
+            if [ -f "$f" ]; then scripts="$scripts $f"; fi
+          done
+          for f in $scripts; do
+            echo "== $f"
+            shellcheck --shell=sh "$f"
+            dash -n "$f"
+          done
+          shellcheck tests/run.sh
+      - name: harness (stub facade on loopback)
+        run: bash tests/run.sh
+
+  build-packages:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The ONLY job in this repository allowed to reference this
+    # environment — it holds the GPG signing subkey (docs/github-config.md §4).
+    environment: release
+    permissions:
+      contents: write # gh release create + asset upload
+      id-token: write # OIDC for provenance attestation
+      attestations: write # store the provenance attestation
+    env:
+      # Tag == version, no v prefix (spec 30 D9): 2026.3.0.
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          go-version: stable
+      - name: install nfpm + repo tooling
+        # rpm supplies rpmsign; createrepo-c builds the yum metadata;
+        # apt-utils supplies apt-ftparchive for the apt indices.
+        # TODO(pin): pin an nfpm version (…/nfpm@vX.Y.Z, not @latest) before first release (docs/github-config.md §3)
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm createrepo-c apt-utils
+
+      - name: build deb + rpm
+        run: |
+          mkdir -p dist
+          NFPM="$(go env GOPATH)/bin/nfpm"
+          "$NFPM" package -f packaging/nfpm.yaml --packager deb --target dist/
+          "$NFPM" package -f packaging/nfpm.yaml --packager rpm --target dist/
+          ls -l dist/
+
+      - name: import GPG signing subkey
+        # The secrets exist only in the `release` environment. The
+        # passphrase file (possibly empty — GPG_PASSPHRASE is optional)
+        # lets every later signing step run batch/loopback without
+        # re-referencing the secret.
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -eu
+          umask 077
+          mkdir -p "$HOME/.gnupg"
+          echo "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
+          printf '%s' "${GPG_PASSPHRASE:-}" > "$HOME/.gnupg/passphrase"
+          printf '%s' "$GPG_SIGNING_KEY" | gpg --batch --import
+          GPG_KEY_ID="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "sec" { print $5; exit }')"
+          test -n "$GPG_KEY_ID"
+          echo "signing as $GPG_KEY_ID"
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+
+      - name: sign the rpm (embedded signature)
+        # rpm carries its signature inside the package; deb integrity is
+        # covered by the signed apt indices below plus the detached .asc.
+        run: |
+          set -eu
+          cat > "$HOME/.rpmmacros" <<EOF
+          %_signature gpg
+          %_gpg_name ${GPG_KEY_ID}
+          %__gpg_sign_cmd %{__gpg} gpg --batch --pinentry-mode loopback --passphrase-file ${HOME}/.gnupg/passphrase --no-armor --digest-algo sha256 -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          EOF
+          rpmsign --addsign dist/*.rpm
+          # Verify what we just signed — an unsigned rpm slipping through
+          # here would only be noticed by a customer's dnf refusing it.
+          gpg --export --armor "$GPG_KEY_ID" > /tmp/signing-key.asc
+          sudo rpm --import /tmp/signing-key.asc
+          rpm --checksig dist/*.rpm
+
+      - name: detached signatures for the release assets
+        run: |
+          set -eu
+          for f in dist/*.deb dist/*.rpm; do
+            gpg --batch --pinentry-mode loopback \
+              --passphrase-file "$HOME/.gnupg/passphrase" \
+              -u "$GPG_KEY_ID" --armor --detach-sign "$f"
+          done
+
+      - name: assemble static apt repo tree
+        # Layout per spec 30 §4: pool + dists/stable/main, Release
+        # clearsigned as InRelease plus detached Release.gpg. The tree is
+        # baked into the monorepo's `get` image and served verbatim at
+        # get.cloudviewer.app/apt.
+        run: |
+          set -eu
+          mkdir -p repo-dist/apt/pool/main \
+                   repo-dist/apt/dists/stable/main/binary-amd64 \
+                   repo-dist/apt/dists/stable/main/binary-arm64
+          cp dist/*.deb repo-dist/apt/pool/main/
+          cd repo-dist/apt
+          # The package is arch:all, and the Debian repo format wants it
+          # listed in every binary-<arch> index — generate once, copy.
+          apt-ftparchive packages pool > dists/stable/main/binary-amd64/Packages
+          cp dists/stable/main/binary-amd64/Packages dists/stable/main/binary-arm64/Packages
+          gzip -9 -k dists/stable/main/binary-amd64/Packages
+          gzip -9 -k dists/stable/main/binary-arm64/Packages
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="Cloud Viewer" \
+            -o APT::FTPArchive::Release::Label="Cloud Viewer" \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Components=main \
+            -o "APT::FTPArchive::Release::Architectures=amd64 arm64" \
+            release dists/stable > dists/stable/Release
+          gpg --batch --pinentry-mode loopback \
+            --passphrase-file "$HOME/.gnupg/passphrase" -u "$GPG_KEY_ID" \
+            --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg --batch --pinentry-mode loopback \
+            --passphrase-file "$HOME/.gnupg/passphrase" -u "$GPG_KEY_ID" \
+            --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
+
+      - name: assemble static yum repo tree
+        # Served at get.cloudviewer.app/rpm. The rpms are individually
+        # signed above; dnf additionally checks the detached signature on
+        # repomd.xml (repo_gpgcheck), which --detach-sign drops next to it
+        # as repomd.xml.asc.
+        run: |
+          set -eu
+          mkdir -p repo-dist/rpm/packages repo-dist/keys
+          cp dist/*.rpm repo-dist/rpm/packages/
+          createrepo_c repo-dist/rpm
+          gpg --batch --pinentry-mode loopback \
+            --passphrase-file "$HOME/.gnupg/passphrase" -u "$GPG_KEY_ID" \
+            --armor --detach-sign repo-dist/rpm/repodata/repomd.xml
+          # Public key, both binary (apt signed-by keyring) and armored —
+          # served at get.cloudviewer.app/keys/. The fingerprint is
+          # cross-published (docs site, portal, README) so a swapped key
+          # is visible in several places at once.
+          gpg --export "$GPG_KEY_ID" > repo-dist/keys/cloudviewer.gpg
+          gpg --export --armor "$GPG_KEY_ID" > repo-dist/keys/cloudviewer.asc
+
+      # SBOM per release artifact: CRA posture, same rationale as the
+      # monorepo's sbom.yml — release artefacts keep CRA-lifetime
+      # retention (docs/compliance in the monorepo). Stable filenames
+      # first, because nfpm's output names embed the version.
+      - name: stable artifact names for SBOM generation
+        run: |
+          set -eu
+          cp dist/*.deb cloudviewer-agent.deb
+          cp dist/*.rpm cloudviewer-agent.rpm
+      - uses: anchore/sbom-action@v0 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          file: cloudviewer-agent.deb
+          format: cyclonedx-json
+          output-file: dist/cloudviewer-agent-deb.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: anchore/sbom-action@v0 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          file: cloudviewer-agent.rpm
+          format: cyclonedx-json
+          output-file: dist/cloudviewer-agent-rpm.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: SHA256SUMS
+        # Last, so it covers every asset in the Release including the
+        # SBOMs and detached signatures.
+        run: |
+          set -eu
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: create GitHub Release
+        # `gh` is preinstalled and needs no third-party action; the job's
+        # contents:write exists for exactly this step.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "$VERSION" dist/* \
+            --verify-tag \
+            --title "cloudviewer-agent $VERSION" \
+            --notes "Signed deb/rpm, SHA256SUMS, and CycloneDX SBOMs for release $VERSION.
+
+          Install via the signed package repository (recommended): https://get.cloudviewer.app — see the README.
+          Verify assets against SHA256SUMS and the detached .asc signatures; the signing-key fingerprint is published at https://cloudviewer.app and in the README.
+          Build provenance for the packages is attested via GitHub artifact attestations for this run."
+
+      - uses: actions/attest-build-provenance@v2 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        # Independent, non-forgeable record tying the packages to this
+        # public run and tag (spec 30 §10) — attacker-visible even if the
+        # signing key ever leaks.
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
+
+      - uses: actions/upload-artifact@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        # Handoff for the monorepo's `get` image rebuild (notify-get
+        # below): the dispatched workflow downloads this run's repo trees
+        # and bakes them into the nginx image.
+        with:
+          name: repo-dist
+          path: repo-dist/
+          retention-days: 90
+          if-no-files-found: error
+
+  build-image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: docker/setup-buildx-action@v3 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: docker/login-action@v3 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        # Multi-arch is cheap here: the image is upstream Vector's alpine
+        # image plus a layer of POSIX scripts (spec 30 D7). <version> is
+        # immutable, `latest` moves; the Helm chart pins by digest.
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/cloudviewer-app/cloudviewer-agent:${{ github.ref_name }}
+            ghcr.io/cloudviewer-app/cloudviewer-agent:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+  build-chart:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io (OCI charts)
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: package and push chart
+        # Chart version comes from Chart.yaml (the chart evolves on its
+        # own cadence); appVersion is stamped from the tag so `helm list`
+        # shows which agent release a deployed chart ships.
+        env:
+          HELM_PUSH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          helm package charts/cloudviewer-agent \
+            --app-version "${GITHUB_REF_NAME}" \
+            --destination chart-dist/
+          printf '%s' "$HELM_PUSH_PASSWORD" | \
+            helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          helm push chart-dist/cloudviewer-agent-*.tgz oci://ghcr.io/cloudviewer-app/charts
+
+  notify-get:
+    # Tells the private monorepo to rebuild the `get` nginx image with
+    # this release's signed repo trees (the repo-dist artifact above);
+    # they reach get.cloudviewer.app when Flux rolls that image.
+    #
+    # Gated on the repository variable MONOREPO_DISPATCH == 'true' — the
+    # same quiet-until-configured pattern as the monorepo's FORGEJO_SYNC
+    # gate in images.yml — because the PAT it needs does not exist yet.
+    # To enable:
+    #   1. Mint a fine-grained PAT scoped to the monorepo with
+    #      Contents: read+write (the repository_dispatch API requires it).
+    #   2. Store it as secret MONOREPO_DISPATCH_TOKEN. Per
+    #      docs/github-config.md §4 secrets live in environments, not at
+    #      repo level: create a second environment (e.g. `dispatch`,
+    #      tag-restricted to `20*` like `release`), put the PAT there, and
+    #      add `environment: dispatch` to this job. Never attach the
+    #      `release` environment here — the signing key stays exclusive
+    #      to build-packages.
+    #   3. Repo Settings → Variables: MONOREPO_DISPATCH = true.
+    if: vars.MONOREPO_DISPATCH == 'true'
+    needs: build-packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: dispatch get-image rebuild
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          gh api repos/mitja/cloudviewer/dispatches \
+            -f event_type=agent-release \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[run_url]=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

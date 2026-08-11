@@ -1,0 +1,49 @@
+// Renovate for the public agent repo — same central bot as the monorepo,
+// running with platform=github so its PRs land here, where CI runs.
+//
+// Three jobs matter in this repo (docs/github-config.md §6):
+//   1. GitHub Actions refs: docs/github-config.md §3 requires commit-SHA
+//      pins; pinGitHubActionDigests converts the bootstrap tag refs
+//      (marked TODO(pin) in the workflows) and keeps the pins current.
+//   2. docker/Dockerfile: pin the timberio/vector base image by digest
+//      and surface new versions.
+//   3. The Vector tested-version pin in install.sh (regex manager below),
+//      so a stale pin shows up as a PR instead of rotting silently.
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    'helpers:pinGitHubActionDigests',
+    'docker:pinDigests',
+  ],
+  packageRules: [
+    {
+      matchUpdateTypes: ['minor', 'patch'],
+      groupName: 'non-major dependencies',
+      schedule: ['before 6am on monday'],
+    },
+    {
+      // Vector bumps are a release-train decision, not a routine merge:
+      // each train re-verifies the new version from an egress-enabled
+      // environment before the pin moves (specs 30 §9). Group the base
+      // image and the install.sh pin so they arrive as one reviewable PR.
+      matchDepNames: ['timberio/vector', 'vectordotdev/vector'],
+      groupName: 'vector',
+    },
+  ],
+  customManagers: [
+    {
+      // VECTOR_VERSION pin in the bootstrap's tarball-fallback path.
+      customType: 'regex',
+      managerFilePatterns: ['/^install\\.sh$/'],
+      matchStrings: ['VECTOR_VERSION="?(?<currentValue>\\d+\\.\\d+\\.\\d+)"?'],
+      depNameTemplate: 'vectordotdev/vector',
+      datasourceTemplate: 'github-releases',
+      extractVersionTemplate: '^v(?<version>.+)$',
+    },
+  ],
+  // Deliberately NOT bot-managed: the `vector (>= …)` dependency floor in
+  // packaging/nfpm.yaml. Raising the tested floor is part of tagging a
+  // release, and a regex manager pointed at nfpm.yaml would bump it
+  // without the re-verification the spec requires.
+}

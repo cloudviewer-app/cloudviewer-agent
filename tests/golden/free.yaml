@@ -1,0 +1,26 @@
+# Cloud Viewer agent configuration — rendered locally by cloudviewer-agent
+# from the facade's parameter manifest (tier: free), do not edit.
+# The config poller re-renders this file when the manifest changes. The
+# facade sends parameters, never config or code (specs/17 §4).
+
+data_dir: /var/lib/cloudviewer-agent
+
+sources:
+  host_metrics:
+    type: host_metrics
+    collectors: [cpu, memory, disk, filesystem, load, network]
+    scrape_interval_secs: 30
+
+sinks:
+  cloudviewer_metrics:
+    type: http
+    inputs: [host_metrics]
+    uri: https://api.example.test/v1/ingest/metrics
+    method: post
+    encoding:
+      codec: text
+    framing:
+      method: newline_delimited
+    request:
+      headers:
+        X-Agent-Token: golden-token

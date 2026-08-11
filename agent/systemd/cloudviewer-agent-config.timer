@@ -1,0 +1,12 @@
+# Per-minute config poll: portal-driven config changes roll out fleet-wide
+# within one poll, with no SSH access to customer machines. The poll is an
+# If-None-Match GET, so the steady state is a 304 and no disk write.
+[Unit]
+Description=Poll the Cloud Viewer facade for agent config changes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target

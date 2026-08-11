@@ -1,0 +1,60 @@
+# Cloud Viewer agent configuration — rendered locally by cloudviewer-agent
+# from the facade's parameter manifest (tier: pro), do not edit.
+# The config poller re-renders this file when the manifest changes. The
+# facade sends parameters, never config or code (specs/17 §4).
+
+data_dir: /var/lib/cloudviewer-agent
+
+sources:
+  host_metrics:
+    type: host_metrics
+    collectors: [cpu, memory, disk, filesystem, load, network]
+    scrape_interval_secs: 30
+
+  journald_warnings:
+    type: journald
+    include_matches:
+      PRIORITY: ["0", "1", "2", "3", "4"]
+
+transforms:
+  redact_journald:
+    type: remap
+    inputs: [journald_warnings]
+    source: |
+      .cv_source = "journald_warnings"
+      .message = to_string(.message) ?? ""
+      .message = replace(.message, r'(?i)authorization["\x27]?[ \t]*[:=][ \t]*["\x27]?(basic[ \t]+|bearer[ \t]+)?[^\s"\x27]+', "authorization: [REDACTED]")
+      .message = replace(.message, r'(?i)bearer[ \t]+[A-Za-z0-9._~+/-]+=*', "bearer [REDACTED]")
+      .message = replace(.message, r'(?i)password[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "password=[REDACTED]")
+      .message = replace(.message, r'(?i)passwd[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "passwd=[REDACTED]")
+      .message = replace(.message, r'(?i)secret[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "secret=[REDACTED]")
+      .message = replace(.message, r'(?i)token[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "token=[REDACTED]")
+      .message = replace(.message, r'(?i)key[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "key=[REDACTED]")
+      .message = replace(.message, r'(?s)-----BEGIN[ A-Z]*PRIVATE KEY-----.*?(-----END[ A-Z]*PRIVATE KEY-----|\z)', "[REDACTED PEM]")
+
+sinks:
+  cloudviewer_metrics:
+    type: http
+    inputs: [host_metrics]
+    uri: https://api.example.test/v1/ingest/metrics
+    method: post
+    encoding:
+      codec: text
+    framing:
+      method: newline_delimited
+    request:
+      headers:
+        X-Agent-Token: golden-token
+
+  cloudviewer_logs:
+    type: http
+    inputs: [redact_journald]
+    uri: https://api.example.test/v1/ingest/logs
+    method: post
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    request:
+      headers:
+        X-Agent-Token: golden-token

@@ -1,0 +1,28 @@
+# One-shot config refresh, driven by cloudviewer-agent-config.timer.
+#
+# Runs unprivileged as the dedicated `cloudviewer-agent` user (created by
+# the package's postinstall): the poller is the agent's network-facing
+# attack surface — curl plus parsing of whatever a (potentially hostile)
+# facade returns — so a compromise here must yield an unprivileged
+# account, never root. Root is not needed anyway: writing configs only
+# takes ownership of /etc/cloudviewer-agent, which the user has. The
+# directory is setgid `vector`, so the files it writes come out
+# group-readable for the vector user — which itself can read configs but
+# never write them (privilege separation both ways). The poller is a
+# conditional GET — see agent/libexec/fetch-config for the full contract.
+[Unit]
+Description=Cloud Viewer agent config refresh
+After=network-online.target
+ConditionPathExists=/etc/cloudviewer-agent/agent.env
+
+[Service]
+Type=oneshot
+User=cloudviewer-agent
+ExecStart=/usr/libexec/cloudviewer-agent/fetch-config
+# Hardening: the poller needs the network, /etc/cloudviewer-agent, and
+# nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/cloudviewer-agent
+ProtectHome=yes

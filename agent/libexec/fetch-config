@@ -1,0 +1,91 @@
+#!/bin/sh
+# shellcheck shell=sh
+# Cloud Viewer agent config poller.
+#
+# Run every minute by cloudviewer-agent-config.timer — as the dedicated
+# unprivileged `cloudviewer-agent` user, never root (see the .service for
+# the rationale; ownership of $ETC_DIR is all the writes below need) —
+# and by the container entrypoint's poll loop: conditional GET of the facade's
+# PARAMETER MANIFEST (never a full config — specs/17 §4) with the stored
+# ETag. On 200 the manifest is validated and rendered into vector.yaml by
+# the sibling render-config, then both are installed atomically (Vector's
+# --watch-config reloads). A 304 is a no-op. Auth failures and invalid
+# manifests keep the last config and log — a revoked token is already
+# blocked at ingest server-side, so keeping the stale config is safe and
+# avoids flapping, and an invalid manifest must never take a working
+# pipeline down.
+#
+# The cached manifest ($ETC_DIR/manifest) lets a package upgrade re-render
+# with the new template without waiting for the facade
+# (packaging/scripts/postinstall.sh → `cloudviewer-agent render`).
+#
+# Test/container overrides: CV_AGENT_ETC_DIR (dir holding agent.env /
+# manifest / vector.yaml / config.etag, default /etc/cloudviewer-agent),
+# CV_AGENT_LIBEXEC_DIR (where render-config lives).
+set -eu
+
+ETC_DIR="${CV_AGENT_ETC_DIR:-/etc/cloudviewer-agent}"
+LIBEXEC_DIR="${CV_AGENT_LIBEXEC_DIR:-/usr/libexec/cloudviewer-agent}"
+# shellcheck disable=SC1091 # written by `cloudviewer-agent enroll`
+. "$ETC_DIR/agent.env"
+
+etag=""
+[ -f "$ETC_DIR/config.etag" ] && etag="$(cat "$ETC_DIR/config.etag")"
+
+tmp_manifest="$ETC_DIR/.manifest.tmp"
+tmp_rendered="$ETC_DIR/.vector.yaml.tmp"
+tmp_headers="$ETC_DIR/.headers.tmp"
+trap 'rm -f "$tmp_manifest" "$tmp_rendered" "$tmp_headers"' EXIT
+
+set -- -sS -o "$tmp_manifest" -D "$tmp_headers" -w '%{http_code}' \
+    -H "X-Agent-Token: $CV_AGENT_TOKEN"
+if [ -n "$etag" ]; then
+    set -- "$@" -H "If-None-Match: $etag"
+fi
+status="$(curl "$@" "$CV_AGENT_FACADE_URL/v1/agent/config")" || {
+    echo "cloudviewer-agent: facade unreachable, keeping current config" >&2
+    exit 0
+}
+
+case "$status" in
+304)
+    exit 0
+    ;;
+200)
+    # Validate-and-render before anything is installed: render-config
+    # rejects any manifest outside its strict schema, so nothing a hostile
+    # server sends — extra keys, unknown versions, or a full config body —
+    # ever reaches vector.yaml. Fail-closed: on rejection the last config
+    # stays and the timer unit surfaces the failure in journald.
+    "$LIBEXEC_DIR/render-config" "$tmp_manifest" >"$tmp_rendered" || {
+        echo "cloudviewer-agent: manifest rejected — keeping current config" >&2
+        exit 1
+    }
+    new_etag="$(tr -d '\r' <"$tmp_headers" | awk 'tolower($1) == "etag:" {print $2}' | tail -n 1)"
+    # vector.yaml is 0640, group vector — the service reads it as the
+    # unprivileged vector user. On the package layout the setgid
+    # /etc/cloudviewer-agent already stamps the vector group on every file
+    # we create, making this chgrp a no-op; keep it belt-and-braces for
+    # layouts without the setgid dir (the container), and guarded because
+    # it can fail both where the vector user does not exist (tests) and
+    # where our unprivileged user lacks the group (harmless: setgid
+    # already did the job there). Nothing in this script needs root. The
+    # manifest holds no secret (the token never travels in it).
+    chmod 640 "$tmp_rendered"
+    chgrp vector "$tmp_rendered" 2>/dev/null || true
+    chmod 644 "$tmp_manifest"
+    mv "$tmp_manifest" "$ETC_DIR/manifest"
+    mv "$tmp_rendered" "$ETC_DIR/vector.yaml"
+    if [ -n "$new_etag" ]; then
+        printf '%s' "$new_etag" >"$ETC_DIR/config.etag"
+    fi
+    ;;
+401 | 403)
+    echo "cloudviewer-agent: token rejected by the facade (HTTP $status) — keeping current config" >&2
+    exit 1
+    ;;
+*)
+    echo "cloudviewer-agent: unexpected facade response (HTTP $status) — keeping current config" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,436 @@
+#!/bin/sh
+# shellcheck shell=sh
+# cloudviewer-agent — enrollment and lifecycle control for the Cloud Viewer
+# monitoring agent (https://cloudviewer.app).
+#
+# The package installs the agent inert: units exist but are guarded by
+# ConditionPathExists on agent.env and are not enabled. This tool is the
+# identity step that activates it:
+#
+#   enroll     validate a per-server token against the facade, write
+#              agent.env + the initial vector.yaml, enable + start the units.
+#              With --enroll-token it takes the fleet path instead
+#              (specs/12 §3): read this server's instance id from the
+#              Hetzner Cloud metadata service, self-register with the
+#              facade, and continue with the minted per-server token.
+#              With no flags it completes enrollment from a pre-provisioned
+#              agent.env (the declarative path: cloud-init write_files or
+#              config management drop the file, then run `enroll`) — a file
+#              carrying CV_AGENT_ENROLL_TOKEN takes the fleet path.
+#   status     enrolled state, unit health, config freshness.
+#   uninstall  deregister, stop the units, remove config/token/data. Package
+#              files stay — remove them with your package manager (apt purge
+#              cloudviewer-agent / dnf remove cloudviewer-agent), whose purge
+#              path does all of this itself.
+#
+# Idempotent by design: re-running enroll refreshes token/config in place
+# (this is also the token-rotation path), and enroll is a safe no-op to run
+# on every configuration-management converge.
+#
+# Test/dev overrides (used by tests/run.sh — never needed on servers):
+#   CV_AGENT_ETC_DIR       config dir (default /etc/cloudviewer-agent);
+#                          setting it also skips the root requirement and
+#                          the chown/chgrp calls
+#   CV_AGENT_DATA_DIR      Vector data_dir (default /var/lib/cloudviewer-agent)
+#   CV_AGENT_SYSTEMCTL     systemctl replacement binary
+#   CV_AGENT_METADATA_URL  instance-id metadata endpoint (fleet enrollment)
+set -eu
+
+ETC_DIR_DEFAULT="/etc/cloudviewer-agent"
+ETC_DIR="${CV_AGENT_ETC_DIR:-$ETC_DIR_DEFAULT}"
+DATA_DIR="${CV_AGENT_DATA_DIR:-/var/lib/cloudviewer-agent}"
+SYSTEMCTL="${CV_AGENT_SYSTEMCTL:-systemctl}"
+LIBEXEC_DIR="${CV_AGENT_LIBEXEC_DIR:-/usr/libexec/cloudviewer-agent}"
+FACADE_DEFAULT="https://api.cloudviewer.app"
+# The Hetzner Cloud link-local metadata service: the identity source for
+# fleet enrollment (specs/12 §2). Dedicated (Robot) servers don't have it.
+METADATA_URL_DEFAULT="http://169.254.169.254/hetzner/v1/metadata/instance-id"
+
+UNITS="cloudviewer-agent.service cloudviewer-agent-config.timer"
+
+# Sandbox mode: the harness redirects every path and stubs systemctl, so
+# root and a real system layout are only required when nothing is overridden.
+SANDBOX=""
+[ -n "${CV_AGENT_ETC_DIR:-}" ] && SANDBOX=1
+
+usage() {
+    cat <<'EOF'
+usage:
+  cloudviewer-agent enroll [--token <t>] [--facade-url <u>] [--quiet]
+  cloudviewer-agent status
+  cloudviewer-agent render
+  cloudviewer-agent uninstall
+  cloudviewer-agent help
+
+enroll options:
+  --token <t>         per-server agent token from the Cloud Viewer portal
+                      (shown once when the server is added). Without it,
+                      enroll completes from an existing
+                      /etc/cloudviewer-agent/agent.env.
+  --enroll-token <t>  fleet enrollment token (portal → Add server → Fleet
+                      enrollment): self-registers this server via the
+                      Hetzner Cloud metadata service and receives its own
+                      per-server token. Hetzner Cloud only — dedicated
+                      (Robot) servers have no metadata service and use
+                      --token. No-op once enrolled (safe on every
+                      config-management converge).
+  --facade-url <u>    facade base URL (default https://api.cloudviewer.app)
+  --quiet             suppress the success banner (for package hooks)
+EOF
+}
+
+log() { printf '%s\n' "$*"; }
+fail() {
+    printf 'cloudviewer-agent: error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_root() {
+    [ -n "$SANDBOX" ] && return 0
+    [ "$(id -u)" = "0" ] || fail "run as root (writes to $ETC_DIR and manages systemd units)"
+}
+
+# fetch_config <out-file> <token> <facade-url>: downloads the parameter
+# manifest. Fails with a friendly message on auth errors so a mistyped or
+# revoked token aborts enrollment before anything is written.
+fetch_config() {
+    out="$1"
+    tok="$2"
+    facade="$3"
+    http_status="$(curl -sS -o "$out" -w '%{http_code}' \
+        -H "X-Agent-Token: $tok" "$facade/v1/agent/config")" ||
+        fail "cannot reach the facade at $facade"
+    case "$http_status" in
+    200) ;;
+    401) fail "the facade rejected the agent token (unknown token) — copy it exactly as shown in the portal" ;;
+    403) fail "this agent token has been revoked — rotate or re-add the server in the portal to get a new one" ;;
+    *) fail "unexpected response from the facade config endpoint (HTTP $http_status)" ;;
+    esac
+}
+
+# read_env <key>: value from agent.env without sourcing it into this shell.
+read_env() {
+    [ -r "$ETC_DIR/agent.env" ] || return 0
+    sed -n "s/^$1=//p" "$ETC_DIR/agent.env" | tail -n 1
+}
+
+# metadata_instance_id: read this server's numeric Hetzner id from the
+# link-local metadata service (specs/12 §2) into $INSTANCE_ID. The id is
+# self-asserted — the FACADE verifies it against the token's project
+# inventory; our only job is to fetch it and fail closed on garbage.
+metadata_instance_id() {
+    meta_url="${CV_AGENT_METADATA_URL:-$METADATA_URL_DEFAULT}"
+    # -m 2: link-local — it answers within milliseconds or not at all
+    # (dedicated servers, non-Hetzner hosts, blocked link-local routes).
+    INSTANCE_ID="$(curl -fsS -m 2 "$meta_url" 2>/dev/null)" || INSTANCE_ID=""
+    [ -n "$INSTANCE_ID" ] ||
+        fail "cannot read the Hetzner Cloud metadata service ($meta_url) —
+fleet enrollment identifies this server by its instance id, which only
+Hetzner Cloud servers can provide; dedicated (Robot) servers use a
+per-server token (--token) from the portal instead"
+    # Fail-closed: anything but a plain 1-20 digit id (an error page, a
+    # captive portal, an impostor endpoint) must not travel to the facade.
+    # A whole-string check, not a line match — a newline is "not a digit".
+    case "$INSTANCE_ID" in
+    *[!0-9]*) fail "the metadata service at $meta_url did not return an instance id — refusing fleet enrollment" ;;
+    esac
+    [ "${#INSTANCE_ID}" -le 20 ] ||
+        fail "the metadata service at $meta_url did not return an instance id — refusing fleet enrollment"
+}
+
+# fleet_enroll <enroll-token> <facade-url>: the fleet flow (specs/12 §3).
+# Self-registers this server and sets $TOKEN to the minted per-server
+# token; everything after that is identical to per-server enrollment. The
+# enrollment token itself is used for exactly this one call — it enrolls,
+# it never ingests, and it is never written to disk (specs/12 §9).
+fleet_enroll() {
+    enroll_tok="$1"
+    facade="$2"
+
+    metadata_instance_id # sets INSTANCE_ID or fails
+
+    # Hostname is advisory (default display name in the portal). It is
+    # interpolated into a JSON string, so a hostname containing a double
+    # quote or backslash would need escaping machinery — instead of
+    # carrying that for a hostname nobody legitimately has, just omit the
+    # optional field and let the portal fall back to the inventory name.
+    host="$(uname -n)"
+    case "$host" in
+    *\"* | *\\* | "") body="{\"instance_id\":\"$INSTANCE_ID\"}" ;;
+    *) body="{\"instance_id\":\"$INSTANCE_ID\",\"hostname\":\"$host\"}" ;;
+    esac
+
+    resp="$(mktemp)"
+    http_status="$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
+        -H "X-Agent-Enroll-Token: $enroll_tok" \
+        -H "Content-Type: application/json" \
+        --data "$body" "$facade/v1/agent/enroll")" || {
+        rm -f "$resp"
+        fail "cannot reach the facade at $facade"
+    }
+    case "$http_status" in
+    200) ;;
+    401)
+        rm -f "$resp"
+        fail "the facade does not know this enrollment token — copy it exactly as shown in the portal (Add server → Fleet enrollment)"
+        ;;
+    403)
+        # The facade distinguishes revoked tokens from a reached server
+        # cap in the body; pass its wording through rather than guessing.
+        detail="$(cat "$resp")"
+        rm -f "$resp"
+        fail "enrollment refused: revoked or server limit reached — the facade said: $detail"
+        ;;
+    404)
+        rm -f "$resp"
+        fail "this server (instance $INSTANCE_ID) is not in the token's project inventory — check the project the token was minted for"
+        ;;
+    *)
+        rm -f "$resp"
+        fail "unexpected response from the facade enroll endpoint (HTTP $http_status)"
+        ;;
+    esac
+
+    # Extract the minted per-server token. The response is the facade's
+    # own controlled JSON (never third-party data), so a targeted sed on
+    # the "token" member — tolerating whitespace around the colon — is
+    # sufficient and keeps this dependency-free; fail-closed if the shape
+    # ever surprises us.
+    TOKEN="$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$resp")"
+    rm -f "$resp"
+    [ -n "$TOKEN" ] ||
+        fail "the facade's enroll response did not contain a token — refusing to continue"
+}
+
+cmd_enroll() {
+    TOKEN=""
+    ENROLL_TOKEN=""
+    FACADE=""
+    QUIET=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --token)
+            [ $# -ge 2 ] || fail "--token needs a value"
+            TOKEN="$2"
+            shift 2
+            ;;
+        --enroll-token)
+            [ $# -ge 2 ] || fail "--enroll-token needs a value"
+            ENROLL_TOKEN="$2"
+            shift 2
+            ;;
+        --facade-url)
+            [ $# -ge 2 ] || fail "--facade-url needs a value"
+            FACADE="${2%/}"
+            shift 2
+            ;;
+        --quiet)
+            QUIET=1
+            shift
+            ;;
+        *)
+            usage >&2
+            fail "unknown argument: $1"
+            ;;
+        esac
+    done
+
+    if [ -n "$TOKEN" ] && [ -n "$ENROLL_TOKEN" ]; then
+        fail "--token and --enroll-token are mutually exclusive — a server enrolls with one identity"
+    fi
+
+    require_root
+    command -v curl >/dev/null 2>&1 || fail "required command not found: curl"
+
+    if [ -z "$FACADE" ]; then
+        FACADE="$(read_env CV_AGENT_FACADE_URL)"
+        [ -n "$FACADE" ] || FACADE="$FACADE_DEFAULT"
+    fi
+
+    # Pre-provisioned path: no flags means the identity comes from an
+    # existing agent.env — the single convention that makes cloud-init,
+    # Ansible, and every other declarative tool work the same way. A
+    # per-server CV_AGENT_TOKEN wins (once enrolled, that IS the
+    # identity); otherwise a CV_AGENT_ENROLL_TOKEN (the fleet variant,
+    # specs/30 §8.2) routes into the fleet flow below.
+    if [ -z "$TOKEN" ] && [ -z "$ENROLL_TOKEN" ]; then
+        TOKEN="$(read_env CV_AGENT_TOKEN)"
+        [ -n "$TOKEN" ] || ENROLL_TOKEN="$(read_env CV_AGENT_ENROLL_TOKEN)"
+        if [ -z "$TOKEN" ] && [ -z "$ENROLL_TOKEN" ]; then
+            fail "no token: pass --token <t>, or pre-provision $ETC_DIR/agent.env with CV_AGENT_TOKEN=... (0600)"
+        fi
+    fi
+
+    # Fleet flow (specs/12 §3). Idempotency FIRST (specs/12 §5): fleet
+    # enrollment runs from config management on every converge, so once a
+    # per-server token exists this must be a network-free no-op — no
+    # metadata read, no facade call. (Rotation stays a per-server-token
+    # concern: `enroll --token <new>` rotates in place as always.)
+    if [ -n "$ENROLL_TOKEN" ]; then
+        if [ -n "$(read_env CV_AGENT_TOKEN)" ]; then
+            log "already enrolled — nothing to do"
+            return 0
+        fi
+        [ -n "$QUIET" ] || log "fleet enrollment: registering this server with $FACADE ..."
+        fleet_enroll "$ENROLL_TOKEN" "$FACADE" # sets TOKEN (minted per-server)
+    fi
+
+    # From here on the two paths are identical: $TOKEN is a per-server
+    # token, whether typed by the operator or just minted by the facade.
+    # The enrollment token is NOT part of what gets written below —
+    # agent.env ends up with only CV_AGENT_TOKEN + CV_AGENT_FACADE_URL
+    # (it enrolls, it never ingests — specs/12 §9), which also erases a
+    # pre-provisioned CV_AGENT_ENROLL_TOKEN line.
+
+    # Validate before writing anything: neither a bad token nor an invalid
+    # manifest may leave a half-enrolled host behind. The token and facade
+    # URL are injected into the render via env — agent.env does not exist
+    # yet, and nothing is written until both steps succeed.
+    tmp="$(mktemp)"
+    tmp_rendered="$(mktemp)"
+    trap 'rm -f "$tmp" "$tmp_rendered"' EXIT
+    [ -n "$QUIET" ] || log "validating agent token against $FACADE ..."
+    fetch_config "$tmp" "$TOKEN" "$FACADE"
+    CV_AGENT_TOKEN="$TOKEN" CV_AGENT_FACADE_URL="$FACADE" \
+        "$LIBEXEC_DIR/render-config" "$tmp" >"$tmp_rendered" ||
+        fail "the facade sent an invalid parameter manifest — refusing to enroll (see message above)"
+
+    umask 077
+    mkdir -p "$ETC_DIR"
+    cat >"$ETC_DIR/agent.env.tmp" <<EOF
+CV_AGENT_TOKEN=$TOKEN
+CV_AGENT_FACADE_URL=$FACADE
+EOF
+    # agent.env is 0600 and owned by the cloudviewer-agent poller user:
+    # the config poller (cloudviewer-agent-config.service) runs
+    # unprivileged and must read the token, while the vector user must
+    # not. All ownership calls below are guarded — the users exist only on
+    # the package layout, not in tests or containers.
+    chmod 600 "$ETC_DIR/agent.env.tmp"
+    [ -n "$SANDBOX" ] || chown cloudviewer-agent "$ETC_DIR/agent.env.tmp" 2>/dev/null || true
+    mv "$ETC_DIR/agent.env.tmp" "$ETC_DIR/agent.env"
+
+    # The cached manifest (no secrets in it) lets `render` re-apply a new
+    # package's template offline; vector.yaml is 0640
+    # cloudviewer-agent:vector — written by the unprivileged poller, read
+    # by the unprivileged vector service (see
+    # agent/systemd/cloudviewer-agent-config.service for the two-user
+    # rationale). Match that ownership here so enroll (root) and the
+    # poller produce indistinguishable files.
+    chmod 644 "$tmp"
+    [ -n "$SANDBOX" ] || chown cloudviewer-agent:vector "$tmp" 2>/dev/null || true
+    mv "$tmp" "$ETC_DIR/manifest"
+    chmod 640 "$tmp_rendered"
+    [ -n "$SANDBOX" ] || chown cloudviewer-agent:vector "$tmp_rendered" 2>/dev/null || true
+    mv "$tmp_rendered" "$ETC_DIR/vector.yaml"
+    trap - EXIT
+    rm -f "$ETC_DIR/config.etag"
+
+    if [ -z "$SANDBOX" ]; then
+        mkdir -p "$DATA_DIR"
+        chown vector:vector "$DATA_DIR" 2>/dev/null || true
+    fi
+
+    # shellcheck disable=SC2086 # UNITS is a deliberate two-word list
+    "$SYSTEMCTL" enable --now $UNITS >/dev/null 2>&1 ||
+        "$SYSTEMCTL" enable --now $UNITS
+
+    if [ -z "$QUIET" ]; then
+        log ""
+        log "Cloud Viewer agent enrolled."
+        log "  config:   $ETC_DIR/vector.yaml (refreshed every minute from the portal)"
+        log "  service:  systemctl status cloudviewer-agent"
+        log ""
+        log "The server will show as Connected in the portal within a minute."
+    fi
+}
+
+cmd_status() {
+    if [ ! -f "$ETC_DIR/agent.env" ]; then
+        log "not enrolled — run: cloudviewer-agent enroll --token <agent_token>"
+        exit 3
+    fi
+    log "enrolled"
+    log "  facade:   $(read_env CV_AGENT_FACADE_URL)"
+    for unit in $UNITS; do
+        state="$("$SYSTEMCTL" is-active "$unit" 2>/dev/null || true)"
+        log "  ${unit}: ${state:-unknown}"
+    done
+    if [ -f "$ETC_DIR/config.etag" ]; then
+        log "  config:   $ETC_DIR/vector.yaml (etag $(cat "$ETC_DIR/config.etag"))"
+    else
+        log "  config:   $ETC_DIR/vector.yaml (no etag yet — first poll pending)"
+    fi
+    if command -v vector >/dev/null 2>&1; then
+        log "  vector:   $(vector --version 2>/dev/null || echo unknown)"
+    fi
+}
+
+# render: re-render vector.yaml from the CACHED manifest — no network.
+# Run by the package's postinstall on upgrades so a new template applies
+# immediately even though the facade's manifest (and ETag) is unchanged;
+# fresh parameters keep arriving through the per-minute poller as usual.
+cmd_render() {
+    require_root
+    [ -f "$ETC_DIR/manifest" ] || exit 0 # not enrolled under the manifest model yet
+    tmp_rendered="$(mktemp)"
+    trap 'rm -f "$tmp_rendered"' EXIT
+    "$LIBEXEC_DIR/render-config" "$ETC_DIR/manifest" >"$tmp_rendered" ||
+        fail "cached manifest failed to render (see message above)"
+    # Same ownership the poller produces: cloudviewer-agent:vector 0640.
+    chmod 640 "$tmp_rendered"
+    [ -n "$SANDBOX" ] || chown cloudviewer-agent:vector "$tmp_rendered" 2>/dev/null || true
+    mv "$tmp_rendered" "$ETC_DIR/vector.yaml"
+    trap - EXIT
+}
+
+cmd_uninstall() {
+    require_root
+    # Best-effort deregistration BEFORE agent.env is deleted — it holds the
+    # token this call authenticates with. The portal entry shows as retired
+    # and is removed after 72 hours; a failed call changes nothing locally.
+    DEREGISTERED=""
+    if [ -f "$ETC_DIR/agent.env" ]; then
+        tok="$(read_env CV_AGENT_TOKEN)"
+        facade="$(read_env CV_AGENT_FACADE_URL)"
+        if [ -n "$tok" ] && [ -n "$facade" ]; then
+            if curl -fsS -m 10 -X POST \
+                -H "X-Agent-Token: $tok" \
+                "$facade/v1/agent/deregister" >/dev/null 2>&1; then
+                DEREGISTERED=1
+            fi
+        fi
+    fi
+    # shellcheck disable=SC2086 # UNITS is a deliberate two-word list
+    "$SYSTEMCTL" disable --now $UNITS 2>/dev/null || true
+    rm -rf "$ETC_DIR" "$DATA_DIR"
+    log "Cloud Viewer agent unenrolled (config, token, and buffered data removed)."
+    log "Remove the package with your package manager, e.g.:"
+    log "  apt purge cloudviewer-agent   (or: dnf remove cloudviewer-agent)"
+    if [ -n "$DEREGISTERED" ]; then
+        log "The server was deregistered: its portal entry shows as retired and disappears after 72 hours."
+    else
+        # Honest about the ambiguity: a timed-out request may still have
+        # been processed — the portal is the source of truth either way.
+        log "Deregistration could not be confirmed — it may still have gone through. Check the portal:"
+        log "if the server does not show as retired, revoke or delete it there."
+    fi
+}
+
+[ $# -ge 1 ] || {
+    usage >&2
+    exit 2
+}
+cmd="$1"
+shift
+case "$cmd" in
+enroll) cmd_enroll "$@" ;;
+status) cmd_status "$@" ;;
+render) cmd_render "$@" ;;
+uninstall) cmd_uninstall "$@" ;;
+help | --help | -h) usage ;;
+*)
+    usage >&2
+    fail "unknown command: $cmd"
+    ;;
+esac

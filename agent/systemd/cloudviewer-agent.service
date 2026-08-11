@@ -1,0 +1,32 @@
+# Cloud Viewer monitoring agent: the pinned Vector binary (from the `vector`
+# package this package depends on) running our rendered config.
+#
+# Runs unprivileged as the vector user the dependency creates — it is already
+# in the adm and systemd-journal groups, which is exactly what auth.log and
+# journald reads require. VECTOR_DATA_DIR keeps buffers and source
+# checkpoints out of /var/lib/vector so a customer's own Vector instance can
+# run alongside without either corrupting the other's state.
+[Unit]
+Description=Cloud Viewer monitoring agent (Vector)
+Documentation=https://cloudviewer.app
+After=network-online.target
+Wants=network-online.target
+# Installed inert: enrollment (`cloudviewer-agent enroll`) creates agent.env
+# and enables the unit; without it there is nothing to run.
+ConditionPathExists=/etc/cloudviewer-agent/agent.env
+
+[Service]
+User=vector
+Group=vector
+Environment=VECTOR_DATA_DIR=/var/lib/cloudviewer-agent
+# Fail loud on a broken config instead of crash-looping into it.
+ExecStartPre=/usr/bin/vector validate /etc/cloudviewer-agent/vector.yaml
+ExecStart=/usr/bin/vector --config /etc/cloudviewer-agent/vector.yaml --watch-config
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

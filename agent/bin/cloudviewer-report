@@ -1,0 +1,129 @@
+#!/bin/sh
+# shellcheck shell=sh
+# Cloud Viewer job reporter.
+#
+# Wraps a command — usually a cron job — measures its duration, reports its
+# exit code to the facade, and PROPAGATES that exit code so the cron line
+# behaves exactly as it did without the wrapper. Reporting is best-effort
+# with one retry on 429/503 honoring Retry-After; a facade outage never
+# fails the wrapped job.
+#
+# Usage: cloudviewer-report --job <name> [--max-age <seconds|Nm|Nh|Nd>]
+#                           [--token-file <path>] -- <command> [args...]
+set -u
+
+ETC_DIR="${CV_AGENT_ETC_DIR:-/etc/cloudviewer-agent}"
+JOB=""
+MAX_AGE=""
+TOKEN_FILE=""
+
+usage() {
+    echo "usage: cloudviewer-report --job <name> [--max-age <seconds|Nm|Nh|Nd>] [--token-file <path>] -- <command> [args...]" >&2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --job)
+        [ $# -ge 2 ] || { usage; exit 2; }
+        JOB="$2"; shift 2 ;;
+    --max-age)
+        [ $# -ge 2 ] || { usage; exit 2; }
+        MAX_AGE="$2"; shift 2 ;;
+    --token-file)
+        [ $# -ge 2 ] || { usage; exit 2; }
+        TOKEN_FILE="$2"; shift 2 ;;
+    --)
+        shift; break ;;
+    *)
+        usage; exit 2 ;;
+    esac
+done
+[ -n "$JOB" ] && [ $# -gt 0 ] || { usage; exit 2; }
+
+# --max-age accepts plain seconds or m/h/d suffixes (26h → 93600). A bad
+# value is a usage error and may exit BEFORE the job runs — unlike token
+# problems below, it is deterministic and visible on the first cron run.
+if [ -n "$MAX_AGE" ]; then
+    suffix=""
+    case "$MAX_AGE" in
+    *m) suffix=60 ;;
+    *h) suffix=3600 ;;
+    *d) suffix=86400 ;;
+    esac
+    if [ -n "$suffix" ]; then
+        MAX_AGE="${MAX_AGE%?}"
+    else
+        suffix=1
+    fi
+    case "$MAX_AGE" in
+    "" | *[!0-9]*)
+        echo "cloudviewer-report: bad --max-age" >&2
+        exit 2
+        ;;
+    esac
+    MAX_AGE=$((MAX_AGE * suffix))
+fi
+
+# Run the wrapped command FIRST; its exit code is the report AND our own
+# exit. Everything after this line is best-effort by contract: no token
+# problem, unreadable file, or facade state may change the job's outcome.
+start=$(date +%s)
+"$@"
+ec=$?
+duration=$(($(date +%s) - start))
+
+# Token + facade URL: --token-file for bring-your-own-Vector hosts and
+# off-server reporters carrying their anchor server's token; agent.env
+# (written by enroll) everywhere else. agent.env is sourced in a SUBSHELL:
+# this script runs under set -u, `.` on an unreadable file would kill a
+# non-interactive POSIX shell, and agent.env is 0600 root — a non-root
+# cron user must degrade to "job ran, not reported", never to "job killed".
+TOKEN="${CV_AGENT_TOKEN:-}"
+FACADE="${CV_AGENT_FACADE_URL:-https://api.cloudviewer.app}"
+if [ -n "$TOKEN_FILE" ]; then
+    TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
+elif [ -z "$TOKEN" ] && [ -r "$ETC_DIR/agent.env" ]; then
+    # shellcheck disable=SC1091
+    env_pair="$( (. "$ETC_DIR/agent.env" 2>/dev/null &&
+        printf '%s|%s' "${CV_AGENT_TOKEN:-}" "${CV_AGENT_FACADE_URL:-}") || true)"
+    TOKEN="${env_pair%%|*}"
+    env_facade="${env_pair#*|}"
+    [ -n "$env_facade" ] && FACADE="$env_facade"
+fi
+
+if [ -z "$TOKEN" ]; then
+    echo "cloudviewer-report: no agent token (install the agent or pass --token-file) — job ran, not reported" >&2
+    exit "$ec"
+fi
+
+payload="{\"reports\":[{\"job_name\":\"$JOB\",\"exit_code\":$ec,\"duration_seconds\":$duration"
+[ -n "$MAX_AGE" ] && payload="$payload,\"max_age_seconds\":$MAX_AGE"
+payload="$payload}]}"
+
+report() {
+    _status=$(curl -sS -o /dev/null -D "${TMPDIR:-/tmp}/cv-report-headers.$$" -w '%{http_code}' \
+        -m 15 -X POST -H "X-Agent-Token: $TOKEN" -H "Content-Type: application/json" \
+        -d "$payload" "$FACADE/v1/ingest/job" 2>/dev/null) || _status=000
+    echo "$_status"
+}
+
+status="$(report)"
+case "$status" in
+429 | 503)
+    # One retry honoring Retry-After — a top-of-the-hour cron pile-up
+    # resolves itself within the burst refill.
+    retry_after="$(tr -d '\r' <"${TMPDIR:-/tmp}/cv-report-headers.$$" 2>/dev/null |
+        awk 'tolower($1) == "retry-after:" {print $2}' | tail -n 1)"
+    case "$retry_after" in *[!0-9]* | "") retry_after=5 ;; esac
+    [ "$retry_after" -gt 60 ] && retry_after=60
+    sleep "$retry_after"
+    status="$(report)"
+    ;;
+esac
+rm -f "${TMPDIR:-/tmp}/cv-report-headers.$$"
+case "$status" in
+2*) : ;;
+*) echo "cloudviewer-report: report for '$JOB' not accepted (HTTP $status) — job result unaffected" >&2 ;;
+esac
+
+exit "$ec"

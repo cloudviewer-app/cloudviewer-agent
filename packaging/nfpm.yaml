@@ -1,0 +1,85 @@
+# nfpm configuration — one declarative file builds both the deb and the rpm.
+#
+# The package deliberately contains NO binary: it is an integration package
+# (scripts + systemd units) that depends on the `vector` package from
+# Vector's own signed repositories (apt.vector.dev / yum.vector.dev). That
+# keeps this package a few KB of readable text — `dpkg -L cloudviewer-agent`
+# is the complete audit answer to "what gets installed" — and keeps the
+# collector binary's supply chain upstream.
+#
+# Build (CI does this; VERSION is <year>.<quarter>.<patch>, e.g. 2026.3.0):
+#   VERSION=2026.3.0 nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+#   VERSION=2026.3.0 nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
+name: cloudviewer-agent
+# No compiled code → one package for every architecture (deb: all,
+# rpm: noarch).
+arch: all
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: Cloud Viewer <support@cloudviewer.app>
+description: |
+  Cloud Viewer monitoring agent (Vector-based).
+  Enrollment, config polling, and job reporting for cloudviewer.app.
+  The collector itself is the upstream `vector` package; this package adds
+  the Cloud Viewer identity, units, and helpers around it. Installed inert:
+  activate with `cloudviewer-agent enroll --token <agent_token>`.
+vendor: Cloud Viewer
+homepage: https://cloudviewer.app
+license: Apache-2.0
+
+# `>=` rather than `=`: an exact pin would force a lockstep release of this
+# package for every upstream security release. The tested version is raised
+# by each release train; strict-pinning operators use apt preferences / dnf
+# versionlock (documented in the README — Vector's repos retain full version
+# history, so exact pins keep resolving).
+depends:
+  - vector (>= 0.57.0)
+overrides:
+  rpm:
+    depends:
+      - vector >= 0.57.0
+
+contents:
+  - src: agent/bin/cloudviewer-agent
+    dst: /usr/bin/cloudviewer-agent
+    file_info:
+      mode: 0755
+  - src: agent/bin/cloudviewer-report
+    dst: /usr/bin/cloudviewer-report
+    file_info:
+      mode: 0755
+  - src: agent/libexec/fetch-config
+    dst: /usr/libexec/cloudviewer-agent/fetch-config
+    file_info:
+      mode: 0755
+  - src: agent/libexec/render-config
+    dst: /usr/libexec/cloudviewer-agent/render-config
+    file_info:
+      mode: 0755
+  - src: agent/systemd/cloudviewer-agent.service
+    dst: /usr/lib/systemd/system/cloudviewer-agent.service
+    file_info:
+      mode: 0644
+  - src: agent/systemd/cloudviewer-agent-config.service
+    dst: /usr/lib/systemd/system/cloudviewer-agent-config.service
+    file_info:
+      mode: 0644
+  - src: agent/systemd/cloudviewer-agent-config.timer
+    dst: /usr/lib/systemd/system/cloudviewer-agent-config.timer
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/cloudviewer-agent/README.md
+    file_info:
+      mode: 0644
+
+# Runtime state (/etc/cloudviewer-agent, /var/lib/cloudviewer-agent) is
+# created by postinstall/enroll, not shipped: it must never show up in a
+# package-contents diff, and its ownership needs the vector user that only
+# exists after the dependency is configured.
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

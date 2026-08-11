@@ -23,7 +23,7 @@
     "existingSecret": { "type": "string" },
     "token": { "type": "string" },
     "enrollToken": {
-      "$comment": "Reserved for fleet enrollment (specs/12). Accepted by the schema so GA is additive, but the template fails when it is set non-empty.",
+      "$comment": "Fleet enrollment token (specs/12 §3) — chart-created Secret key enroll-token; the recommended credential for multi-node clusters. The template refuses token and enrollToken together.",
       "type": "string"
     },
     "facadeUrl": { "type": "string", "pattern": "^https?://" },

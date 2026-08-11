@@ -265,6 +265,18 @@ grep -q "CV_AGENT_ENROLL_TOKEN" "$ETC/agent.env" && fail "the enrollment token m
 grep -q "X-Agent-Token: good-token" "$ETC/vector.yaml" || fail "pre-provisioned fleet enroll must render the config"
 ok "pre-provisioned CV_AGENT_ENROLL_TOKEN + bare enroll → fleet path, minted token only"
 
+# ---- 5h. fleet-enroll helper: the entrypoint's stdout contract --------------
+# The container entrypoint consumes the shared helper directly (no ctl in
+# the image): the minted token must be EXACTLY the stdout, errors must
+# stay on stderr, so a captured "$(fleet-enroll)" is usable verbatim.
+
+minted="$(env CV_AGENT_ENROLL_TOKEN=good-enroll-token CV_AGENT_FACADE_URL="$FACADE" \
+    CV_AGENT_METADATA_URL="$META" sh "$REPO_DIR/agent/libexec/fleet-enroll" 2>"$TMP/fleet-helper.err")" ||
+    fail "fleet-enroll helper must succeed against the stub"
+[ "$minted" = "good-token" ] || fail "helper stdout must be exactly the minted token, got: $minted"
+[ ! -s "$TMP/fleet-helper.err" ] || fail "helper success must write nothing to stderr"
+ok "fleet-enroll helper → minted token on stdout, silent stderr (entrypoint contract)"
+
 # ---- 6. config poller: 200 → 304 → tier change → re-render ------------------
 
 run_ctl enroll --token good-token --facade-url "$FACADE" --quiet

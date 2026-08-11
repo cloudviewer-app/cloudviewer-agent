@@ -16,20 +16,29 @@ image:
   # IfNotPresent because tags are immutable per release (specs/30 §6).
   pullPolicy: IfNotPresent
 
-# Name of an existing Secret holding the agent token under the key "token".
-# This is the documented path — the token never lands in values files or
-# Helm release state. Create it with:
-#   kubectl create secret generic cloudviewer-agent --from-literal=token=<token>
+# Name of an existing Secret holding the credential. This is the
+# documented path — nothing secret lands in values files or Helm release
+# state. Two keys are understood (either or both; a per-server token wins):
+#   enroll-token  fleet enrollment token (portal → Add server → Fleet
+#                 enrollment) — RECOMMENDED for clusters: every node
+#                 self-registers as its own server via the Hetzner
+#                 metadata service, and a replaced node re-enrolls on
+#                 its own (specs/12 §3/§5).
+#   token         per-server agent token — single-node clusters only:
+#                 a DaemonSet sharing one per-server token reports every
+#                 node as the same server.
+# Create it with:
+#   kubectl create secret generic cloudviewer-agent --from-literal=enroll-token=<token>
 existingSecret: ""
 
 # Convenience for quick starts: when set (and existingSecret is not), the
 # chart creates the Secret itself. Discouraged beyond a first try — the
-# token then lives in your values/history and in Helm's release Secret.
+# credential then lives in your values/history and in Helm's release
+# Secret. Set at most one of token / enrollToken (the chart refuses both).
 token: ""
 
-# Reserved for fleet enrollment (specs/12) — NOT YET FUNCTIONAL. The key
-# exists so GA is additive; setting it today makes the install fail with an
-# explanation rather than silently doing the wrong thing.
+# Fleet enrollment token (key "enroll-token" in the created Secret) — the
+# recommended credential for multi-node clusters; see existingSecret above.
 enrollToken: ""
 
 # Facade base URL the agent fetches its config from and ships telemetry to.

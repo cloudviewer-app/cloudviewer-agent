@@ -42,9 +42,6 @@ DATA_DIR="${CV_AGENT_DATA_DIR:-/var/lib/cloudviewer-agent}"
 SYSTEMCTL="${CV_AGENT_SYSTEMCTL:-systemctl}"
 LIBEXEC_DIR="${CV_AGENT_LIBEXEC_DIR:-/usr/libexec/cloudviewer-agent}"
 FACADE_DEFAULT="https://api.cloudviewer.app"
-# The Hetzner Cloud link-local metadata service: the identity source for
-# fleet enrollment (specs/12 §2). Dedicated (Robot) servers don't have it.
-METADATA_URL_DEFAULT="http://169.254.169.254/hetzner/v1/metadata/instance-id"
 
 UNITS="cloudviewer-agent.service cloudviewer-agent-config.timer"
 
@@ -114,92 +111,15 @@ read_env() {
     sed -n "s/^$1=//p" "$ETC_DIR/agent.env" | tail -n 1
 }
 
-# metadata_instance_id: read this server's numeric Hetzner id from the
-# link-local metadata service (specs/12 §2) into $INSTANCE_ID. The id is
-# self-asserted — the FACADE verifies it against the token's project
-# inventory; our only job is to fetch it and fail closed on garbage.
-metadata_instance_id() {
-    meta_url="${CV_AGENT_METADATA_URL:-$METADATA_URL_DEFAULT}"
-    # -m 2: link-local — it answers within milliseconds or not at all
-    # (dedicated servers, non-Hetzner hosts, blocked link-local routes).
-    INSTANCE_ID="$(curl -fsS -m 2 "$meta_url" 2>/dev/null)" || INSTANCE_ID=""
-    [ -n "$INSTANCE_ID" ] ||
-        fail "cannot read the Hetzner Cloud metadata service ($meta_url) —
-fleet enrollment identifies this server by its instance id, which only
-Hetzner Cloud servers can provide; dedicated (Robot) servers use a
-per-server token (--token) from the portal instead"
-    # Fail-closed: anything but a plain 1-20 digit id (an error page, a
-    # captive portal, an impostor endpoint) must not travel to the facade.
-    # A whole-string check, not a line match — a newline is "not a digit".
-    case "$INSTANCE_ID" in
-    *[!0-9]*) fail "the metadata service at $meta_url did not return an instance id — refusing fleet enrollment" ;;
-    esac
-    [ "${#INSTANCE_ID}" -le 20 ] ||
-        fail "the metadata service at $meta_url did not return an instance id — refusing fleet enrollment"
-}
-
-# fleet_enroll <enroll-token> <facade-url>: the fleet flow (specs/12 §3).
-# Self-registers this server and sets $TOKEN to the minted per-server
-# token; everything after that is identical to per-server enrollment. The
-# enrollment token itself is used for exactly this one call — it enrolls,
-# it never ingests, and it is never written to disk (specs/12 §9).
+# fleet_enroll <enroll-token> <facade-url>: the fleet flow (specs/12 §3),
+# delegated to the shared libexec helper (one implementation for the ctl
+# and the container entrypoint): metadata instance-id, self-registration,
+# minted-token extraction. Sets $TOKEN to the minted per-server token;
+# everything after that is identical to per-server enrollment. The helper
+# already prints the friendly error, so failure just exits.
 fleet_enroll() {
-    enroll_tok="$1"
-    facade="$2"
-
-    metadata_instance_id # sets INSTANCE_ID or fails
-
-    # Hostname is advisory (default display name in the portal). It is
-    # interpolated into a JSON string, so a hostname containing a double
-    # quote or backslash would need escaping machinery — instead of
-    # carrying that for a hostname nobody legitimately has, just omit the
-    # optional field and let the portal fall back to the inventory name.
-    host="$(uname -n)"
-    case "$host" in
-    *\"* | *\\* | "") body="{\"instance_id\":\"$INSTANCE_ID\"}" ;;
-    *) body="{\"instance_id\":\"$INSTANCE_ID\",\"hostname\":\"$host\"}" ;;
-    esac
-
-    resp="$(mktemp)"
-    http_status="$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
-        -H "X-Agent-Enroll-Token: $enroll_tok" \
-        -H "Content-Type: application/json" \
-        --data "$body" "$facade/v1/agent/enroll")" || {
-        rm -f "$resp"
-        fail "cannot reach the facade at $facade"
-    }
-    case "$http_status" in
-    200) ;;
-    401)
-        rm -f "$resp"
-        fail "the facade does not know this enrollment token — copy it exactly as shown in the portal (Add server → Fleet enrollment)"
-        ;;
-    403)
-        # The facade distinguishes revoked tokens from a reached server
-        # cap in the body; pass its wording through rather than guessing.
-        detail="$(cat "$resp")"
-        rm -f "$resp"
-        fail "enrollment refused: revoked or server limit reached — the facade said: $detail"
-        ;;
-    404)
-        rm -f "$resp"
-        fail "this server (instance $INSTANCE_ID) is not in the token's project inventory — check the project the token was minted for"
-        ;;
-    *)
-        rm -f "$resp"
-        fail "unexpected response from the facade enroll endpoint (HTTP $http_status)"
-        ;;
-    esac
-
-    # Extract the minted per-server token. The response is the facade's
-    # own controlled JSON (never third-party data), so a targeted sed on
-    # the "token" member — tolerating whitespace around the colon — is
-    # sufficient and keeps this dependency-free; fail-closed if the shape
-    # ever surprises us.
-    TOKEN="$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$resp")"
-    rm -f "$resp"
-    [ -n "$TOKEN" ] ||
-        fail "the facade's enroll response did not contain a token — refusing to continue"
+    TOKEN="$(CV_AGENT_ENROLL_TOKEN="$1" CV_AGENT_FACADE_URL="$2" \
+        "$LIBEXEC_DIR/fleet-enroll")" || exit 1
 }
 
 cmd_enroll() {

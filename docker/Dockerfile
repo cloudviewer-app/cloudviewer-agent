@@ -30,6 +30,7 @@ RUN apk add --no-cache curl
 # --chmod needs BuildKit (default in current docker and always in buildx).
 COPY --chmod=0755 agent/libexec/fetch-config /usr/libexec/cloudviewer-agent/fetch-config
 COPY --chmod=0755 agent/libexec/render-config /usr/libexec/cloudviewer-agent/render-config
+COPY --chmod=0755 agent/libexec/fleet-enroll /usr/libexec/cloudviewer-agent/fleet-enroll
 COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
 
 # org.opencontainers.image.source is what links the GHCR package to the

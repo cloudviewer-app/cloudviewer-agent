@@ -62,6 +62,25 @@ The package installs **inert** — nothing starts until `enroll` writes the
 identity. The token is shown once in the Cloud Viewer portal when the
 server is added.
 
+### Fleet enrollment (Hetzner Cloud)
+
+For many servers, skip per-server tokens entirely: mint a **fleet
+enrollment token** in the portal (Add server → Fleet enrollment) and use
+the same token everywhere:
+
+```sh
+cloudviewer-agent enroll --enroll-token <fleet_token>
+```
+
+Each server reads its own identity from the Hetzner Cloud metadata
+service, self-registers (the facade verifies the claimed instance against
+your project's inventory before trusting it), and receives its own
+per-server token — the fleet token enrolls, it never ingests, and it is
+never stored on the host. Re-running is a network-free no-op once
+enrolled, so the command is safe in every configuration-management
+converge. Hetzner Cloud only: dedicated (Robot) servers have no metadata
+service and use `--token`.
+
 ### Declarative automation
 
 `cloudviewer-agent enroll` with no flags completes enrollment from a
@@ -111,16 +130,20 @@ docker run -d --name cloudviewer-agent --restart always \
 
 ### Kubernetes
 
+Use a fleet enrollment token — each node self-registers as its own
+server, and node replacement re-enrolls automatically:
+
 ```sh
-kubectl create secret generic cloudviewer-agent --from-literal=token=<token>
+kubectl create secret generic cloudviewer-agent \
+  --from-literal=enroll-token=<fleet_enrollment_token>
 helm install cloudviewer-agent \
   oci://ghcr.io/cloudviewer-app/charts/cloudviewer-agent \
   --set existingSecret=cloudviewer-agent
 ```
 
-**Beta caveat:** with today's per-server tokens, one token across a
-DaemonSet makes every node report as the same server — fine for a
-single-node k3s box, wrong for a real cluster. See
+A per-server token (Secret key `token`) also works but only makes sense
+on a single-node cluster — one token across a DaemonSet reports every
+node as the same server. Details and caveats:
 `charts/cloudviewer-agent/README.md`.
 
 ### Other platforms

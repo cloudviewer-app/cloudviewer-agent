@@ -1,13 +1,12 @@
 apiVersion: v2
 name: cloudviewer-agent
-# BETA: with today's per-server tokens every node in the DaemonSet reports
-# as the same server — fine for single-node k3s, wrong for a real cluster.
-# GA comes with fleet enrollment (specs/12); see README.md.
-description: Cloud Viewer monitoring agent as a DaemonSet (beta until fleet enrollment ships)
+description: Cloud Viewer monitoring agent as a DaemonSet — each node self-registers via fleet enrollment
 type: application
-# Chart version, independent of the agent release train; stays 0.x while
-# the chart is beta (§7 of the packaging spec).
-version: 0.1.0
+# Chart version, independent of the agent release train. 0.2.0 made fleet
+# enrollment functional (enrollToken / Secret key "enroll-token"), which
+# was the chart's GA condition (specs/30 §7); 1.0.0 is cut with the first
+# agent release train.
+version: 0.2.0
 # The agent/image version this chart deploys by default (<year>.<quarter>.<patch>).
 appVersion: "2026.3.0"
 home: https://cloudviewer.app

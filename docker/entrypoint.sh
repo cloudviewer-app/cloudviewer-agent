@@ -9,11 +9,23 @@
 # systemd timer (no systemd in a container; the loop IS the timer).
 #
 # Environment:
-#   CV_AGENT_TOKEN        agent token (shown once in the portal at server
-#                         creation)
-#   CV_AGENT_TOKEN_FILE   file holding the token (for Secret mounts); wins
-#                         over CV_AGENT_TOKEN when both are set
-#   CV_AGENT_FACADE_URL   facade base URL (default https://api.cloudviewer.app)
+#   CV_AGENT_TOKEN              per-server agent token (shown once in the
+#                               portal at server creation)
+#   CV_AGENT_TOKEN_FILE         file holding that token (Secret mounts)
+#   CV_AGENT_ENROLL_TOKEN       fleet enrollment token (specs/12 §3): the
+#                               container self-registers via the Hetzner
+#                               metadata service (needs hostNetwork) and
+#                               uses the minted per-server token instead
+#   CV_AGENT_ENROLL_TOKEN_FILE  file holding the fleet token (Secret mounts)
+#   CV_AGENT_FACADE_URL         facade base URL (default https://api.cloudviewer.app)
+#
+# Precedence: a per-server credential always wins over a fleet credential
+# (an explicit server identity beats self-registration), and within each
+# kind the mounted file wins over the env var. *_FILE paths that do not
+# exist or are unreadable are treated as "not provided" — the Helm chart
+# mounts one Secret and always sets both *_FILE vars, and which keys the
+# Secret actually carries decides the mode; only ending up with NO
+# credential at all is fatal.
 #
 # PROCFS_ROOT / SYSFS_ROOT are read by Vector's host_metrics source, not by
 # this script: they arrive from the pod spec / `docker run -e` alongside the
@@ -31,25 +43,45 @@ fail() {
     exit 1
 }
 
-# --- Resolve the token ------------------------------------------------------
-# File beats env when both are set: a mounted Secret is deliberate
-# configuration, a stray env var more likely an accident. The command
-# substitution trims the trailing newline a Secret file or
-# `echo token > file` usually carries.
-TOKEN="${CV_AGENT_TOKEN:-}"
-if [ -n "${CV_AGENT_TOKEN_FILE:-}" ]; then
-    [ -r "$CV_AGENT_TOKEN_FILE" ] ||
-        fail "CV_AGENT_TOKEN_FILE is set but not readable: $CV_AGENT_TOKEN_FILE"
-    TOKEN="$(cat "$CV_AGENT_TOKEN_FILE")"
-fi
-# Missing token = immediate exit 1 and a restart-policy crash loop — the
-# desired visible failure (spec 30 §6): visibly broken beats silently
-# unenrolled.
-[ -n "$TOKEN" ] ||
-    fail "no agent token: set CV_AGENT_TOKEN or CV_AGENT_TOKEN_FILE (the token is shown once in the portal when the server is added)"
-
 FACADE_URL="${CV_AGENT_FACADE_URL:-https://api.cloudviewer.app}"
 FACADE_URL="${FACADE_URL%/}"
+
+# --- Resolve the token ------------------------------------------------------
+# File beats env within each credential kind: a mounted Secret is
+# deliberate configuration, a stray env var more likely an accident. The
+# command substitution trims the trailing newline a Secret file or
+# `echo token > file` usually carries. See the header for why a missing
+# *_FILE is "not provided" rather than fatal.
+TOKEN="${CV_AGENT_TOKEN:-}"
+if [ -n "${CV_AGENT_TOKEN_FILE:-}" ] && [ -r "$CV_AGENT_TOKEN_FILE" ]; then
+    TOKEN="$(cat "$CV_AGENT_TOKEN_FILE")"
+fi
+
+if [ -z "$TOKEN" ]; then
+    ENROLL_TOKEN="${CV_AGENT_ENROLL_TOKEN:-}"
+    if [ -n "${CV_AGENT_ENROLL_TOKEN_FILE:-}" ] && [ -r "$CV_AGENT_ENROLL_TOKEN_FILE" ]; then
+        ENROLL_TOKEN="$(cat "$CV_AGENT_ENROLL_TOKEN_FILE")"
+    fi
+    if [ -n "$ENROLL_TOKEN" ]; then
+        # Fleet flow (specs/12 §3), shared implementation with the OS
+        # package's ctl. A container restart re-runs this: the facade's
+        # enrollment is idempotent — the same node re-registers onto the
+        # same server row, the freshly minted token replaces the oldest
+        # of the row's (max two) active tokens, and the fleet token
+        # itself never persists anywhere. Failure exits 1 → restart-policy
+        # crash loop, the desired visible failure (spec 30 §6); the
+        # helper's stderr says exactly why (no metadata service = no
+        # hostNetwork is the common Kubernetes mistake).
+        TOKEN="$(CV_AGENT_ENROLL_TOKEN="$ENROLL_TOKEN" CV_AGENT_FACADE_URL="$FACADE_URL" \
+            /usr/libexec/cloudviewer-agent/fleet-enroll)" || exit 1
+    fi
+fi
+
+# Missing credential = immediate exit 1 and a restart-policy crash loop —
+# the desired visible failure (spec 30 §6): visibly broken beats silently
+# unenrolled.
+[ -n "$TOKEN" ] ||
+    fail "no credential: set CV_AGENT_TOKEN(_FILE) with a per-server token, or CV_AGENT_ENROLL_TOKEN(_FILE) with a fleet enrollment token (portal → Add server)"
 
 # --- agent.env --------------------------------------------------------------
 # The same file the OS package's `enroll` writes; fetch-config sources it.

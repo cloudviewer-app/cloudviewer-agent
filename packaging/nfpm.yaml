@@ -58,6 +58,10 @@ contents:
     dst: /usr/libexec/cloudviewer-agent/render-config
     file_info:
       mode: 0755
+  - src: agent/libexec/fleet-enroll
+    dst: /usr/libexec/cloudviewer-agent/fleet-enroll
+    file_info:
+      mode: 0755
   - src: agent/systemd/cloudviewer-agent.service
     dst: /usr/lib/systemd/system/cloudviewer-agent.service
     file_info:

@@ -10,17 +10,18 @@ If pods crash-loop, their logs say why (bad or revoked token is the usual
 cause):
 
   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} --tail=20
+{{- if or .Values.token .Values.enrollToken }}
+
+NOTE: you passed a credential as a plain chart value. It now lives in
+this release's Helm Secret and in your values/history. Prefer creating
+the Secret yourself and setting existingSecret — see the chart README.
+{{- end }}
 {{- if .Values.token }}
 
-NOTE: you passed the token as a plain chart value. It now lives in this
-release's Helm Secret and in your values/history. Prefer creating the
-Secret yourself and setting existingSecret — see the chart README.
+PER-SERVER TOKEN — one token, many nodes: every node of this DaemonSet
+reports as the SAME server in the portal, and metrics from different
+nodes overwrite each other. That is fine for a single-node cluster (k3s
+on one box) and wrong for a multi-node cluster — use a fleet enrollment
+token there (Secret key "enroll-token"; portal → Add server → Fleet
+enrollment) so each node registers itself as its own server.
 {{- end }}
-
-BETA CAVEAT — one token, many nodes: this chart is beta because agent
-tokens are currently per-server. A DaemonSet shares one token across all
-nodes, so every node reports as the SAME server in the portal — metrics
-from different nodes overwrite each other. That is fine for a single-node
-cluster (k3s on one box) and wrong for a real multi-node cluster. GA comes
-with fleet enrollment: the reserved enrollToken value will let each node
-register itself as its own server.

@@ -10,47 +10,52 @@ agent's Vector config is rendered by the Cloud Viewer portal and fetched by
 the agent itself. If you want a general-purpose Vector deployment, use
 [Vector's own chart](https://github.com/vectordotdev/helm-charts) instead.
 
-## Beta status — read this first
+## Which credential — read this first
 
-**This chart is beta until Cloud Viewer fleet enrollment ships.** Agent
-tokens today identify one *server*. A DaemonSet shares a single token
-across every node, so **all nodes report as the same server** in the
-portal, overwriting each other's metrics. In practice:
+The chart understands two credentials, and picking the right one matters:
 
-- **Single-node cluster** (k3s/k0s on one box): works fine — the one node
-  is the one server.
-- **Multi-node cluster**: wrong tool for now — you would see one server
-  flapping between the identities of its nodes. Install the agent on each
-  node with the OS package or installer instead.
+- **Fleet enrollment token** (Secret key `enroll-token`) — **use this for
+  clusters.** Minted in the portal (Add server → Fleet enrollment), one
+  token for the whole fleet: each node reads its own Hetzner instance id
+  from the metadata service (hence the chart's fixed `hostNetwork`),
+  self-registers as its own server, and receives its own per-server
+  ingest token. The facade verifies every claimed instance against your
+  project's inventory before trusting it; the fleet token itself can
+  enroll but never ingest, and it never persists inside the pod. Pod
+  restarts and node replacements re-enroll idempotently — a replaced
+  node's old server row retires automatically when the old machine
+  disappears from your Hetzner project (specs/12 §12.2).
+- **Per-server token** (Secret key `token`) — **single-node clusters
+  only** (k3s/k0s on one box). A DaemonSet sharing one per-server token
+  makes every node report as the same server, overwriting each other's
+  metrics. If both keys exist, the per-server token wins.
 
-GA arrives with fleet enrollment: the already-reserved `enrollToken` value
-will hand each node an enrollment token with which it registers itself as
-its own server (and re-registers under the same identity after node
-replacement). Setting `enrollToken` today fails the install with a message
-to that effect.
+Non-Hetzner-Cloud nodes cannot use fleet enrollment (no metadata
+service); their pods will crash-loop with a message saying exactly that.
 
 ## Install
 
-Create the token Secret yourself (recommended — the token never touches
+Create the Secret yourself (recommended — no credential ever touches
 values files or Helm release state), then install pointing at it:
 
 ```sh
-kubectl create secret generic cloudviewer-agent --from-literal=token=<agent_token>
+kubectl create secret generic cloudviewer-agent \
+  --from-literal=enroll-token=<fleet_enrollment_token>
 
 helm install cloudviewer-agent oci://ghcr.io/cloudviewer-app/charts/cloudviewer-agent \
   --set existingSecret=cloudviewer-agent
 ```
 
-The Secret must hold the token under the key `token`. The agent token is
-shown once in the portal when the server is added.
-
-Quick start alternative (discouraged beyond a first try — the token ends
-up in your shell history and in Helm's release Secret):
+Quick start alternative (discouraged beyond a first try — the credential
+ends up in your shell history and in Helm's release Secret):
 
 ```sh
 helm install cloudviewer-agent oci://ghcr.io/cloudviewer-app/charts/cloudviewer-agent \
-  --set token=<agent_token>
+  --set enrollToken=<fleet_enrollment_token>
 ```
+
+For a single-node cluster with a per-server token, use
+`--from-literal=token=<agent_token>` / `--set token=…` instead.
 
 ## Values
 
@@ -60,9 +65,9 @@ helm install cloudviewer-agent oci://ghcr.io/cloudviewer-app/charts/cloudviewer-
 | `image.tag` | `""` (chart `appVersion`) | Image tag; empty follows the chart's app version. |
 | `image.digest` | `""` | `sha256:…` digest pin — preferred over tag when set (immutable). |
 | `image.pullPolicy` | `IfNotPresent` | Tags are immutable per release. |
-| `existingSecret` | `""` | Name of a Secret with the agent token under key `token`. **The documented path.** |
-| `token` | `""` | Quick start only: chart creates the Secret from this value. |
-| `enrollToken` | `""` | Reserved for fleet enrollment — not yet functional; setting it fails the install. |
+| `existingSecret` | `""` | Name of a Secret with key `enroll-token` (fleet) and/or `token` (per-server). **The documented path.** |
+| `token` | `""` | Quick start only: per-server token; chart creates the Secret. Single-node clusters only. |
+| `enrollToken` | `""` | Quick start only: fleet enrollment token; chart creates the Secret. |
 | `facadeUrl` | `https://api.cloudviewer.app` | Facade base URL. |
 | `resources` | small requests, 256Mi limit | Pod resources. |
 | `tolerations` | `[]` | E.g. tolerate control-plane taints to cover masters. |
@@ -70,18 +75,21 @@ helm install cloudviewer-agent oci://ghcr.io/cloudviewer-app/charts/cloudviewer-
 | `podAnnotations` | `{}` | Extra pod annotations. |
 | `priorityClassName` | `""` | Keep the agent scheduled under node pressure. |
 
-Exactly one of `existingSecret` / `token` is required; the install fails
-with an explanation when neither is set.
+One of `existingSecret` / `enrollToken` / `token` is required (the
+install fails with an explanation otherwise); setting both `token` and
+`enrollToken` is refused.
 
 ## What the pod does
 
 The container entrypoint (`docker/entrypoint.sh` in this repo) reads the
-token from the mounted Secret, fetches the portal-rendered Vector config
-from the facade, starts Vector with `--watch-config`, and re-polls the
-config every 60 seconds with an ETag-conditional GET — portal-driven config
-changes roll out without touching the cluster. A bad or revoked token
-crash-loops the pod with a clear log message: visibly broken beats silently
-unenrolled.
+credential from the mounted Secret — self-registering first when it is a
+fleet token — then fetches the facade's parameter manifest, renders the
+Vector config locally (the facade sends parameters, never config or
+code), starts Vector with `--watch-config`, and re-polls the manifest
+every 60 seconds with an ETag-conditional GET — portal-driven changes
+roll out without touching the cluster. A bad or revoked token
+crash-loops the pod with a clear log message: visibly broken beats
+silently unenrolled.
 
 No ServiceAccount or RBAC is created: the agent talks only to the Cloud
 Viewer facade, nothing in-cluster.

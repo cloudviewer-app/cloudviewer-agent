@@ -40,7 +40,7 @@ jobs:
           # scriptlet ever executes. A fixed list on purpose: a lint gate
           # that discovers its own inputs can silently lint nothing, and
           # shellcheck failing on a missing file keeps the list honest.
-          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config agent/libexec/render-config packaging/scripts/postinstall.sh packaging/scripts/preremove.sh packaging/scripts/postremove.sh"
+          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config agent/libexec/render-config agent/libexec/fleet-enroll packaging/scripts/postinstall.sh packaging/scripts/preremove.sh packaging/scripts/postremove.sh"
           for f in packaging/scripts/*; do
             if [ -f "$f" ]; then scripts="$scripts $f"; fi
           done

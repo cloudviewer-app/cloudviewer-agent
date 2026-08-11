@@ -2,11 +2,11 @@
 Fail fast on misconfiguration — a template error at install time beats a
 crash-looping DaemonSet at runtime.
 */}}
-{{- if .Values.enrollToken }}
-{{- fail "enrollToken is reserved for fleet enrollment, which is not available yet. Use existingSecret (a Secret with key \"token\") or token with a per-server agent token from the portal." }}
+{{- if and (not .Values.existingSecret) (not .Values.token) (not .Values.enrollToken) }}
+{{- fail "No credential configured. Set existingSecret to a Secret carrying key \"enroll-token\" (fleet enrollment — recommended for clusters) or key \"token\" (per-server, single-node only); or set enrollToken/token to have the chart create that Secret." }}
 {{- end }}
-{{- if and (not .Values.existingSecret) (not .Values.token) }}
-{{- fail "No agent token configured. Set existingSecret to a Secret holding the token under the key \"token\" (recommended), or set token to have the chart create that Secret." }}
+{{- if and .Values.token .Values.enrollToken }}
+{{- fail "Set either token or enrollToken, not both — a per-server token pins ALL nodes to one server identity and would override fleet enrollment." }}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -32,8 +32,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      # hostNetwork so the agent reaches the cloud provider's metadata
-      # service (169.254.169.254) for provider detection, and so network
+      # hostNetwork so the agent reaches the Hetzner metadata service
+      # (169.254.169.254) — with fleet enrollment that is how each node
+      # learns the instance id it self-registers under — and so network
       # metrics see the node's interfaces (specs/12 §5).
       # ClusterFirstWithHostNet keeps in-cluster DNS working under
       # hostNetwork (the default would silently switch to the node's
@@ -58,11 +59,16 @@ spec:
           image: {{ include "cloudviewer-agent.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            # Token via file mount, not env secretKeyRef: a file never
-            # shows up in `kubectl describe pod` or crash dumps of the
-            # environment, and rotating the Secret updates the mount.
+            # Credentials via file mount, not env secretKeyRef: a file
+            # never shows up in `kubectl describe pod` or crash dumps of
+            # the environment, and rotating the Secret updates the mount.
+            # Both paths are always declared; the entrypoint treats a
+            # missing file as "not provided", so the keys actually present
+            # in the Secret decide the mode (per-server wins over fleet).
             - name: CV_AGENT_TOKEN_FILE
               value: /var/run/secrets/cloudviewer/token
+            - name: CV_AGENT_ENROLL_TOKEN_FILE
+              value: /var/run/secrets/cloudviewer/enroll-token
             - name: CV_AGENT_FACADE_URL
               value: {{ .Values.facadeUrl | quote }}
             # Point Vector's host_metrics at the host's /proc and /sys
@@ -88,12 +94,13 @@ spec:
               mountPath: /host/root
               readOnly: true
       volumes:
+        # Whole-Secret mount (no items:) on purpose: an items list naming
+        # a key the Secret lacks fails the mount, and with existingSecret
+        # the chart cannot know whether the user provided "token",
+        # "enroll-token", or both.
         - name: token
           secret:
             secretName: {{ include "cloudviewer-agent.secretName" . }}
-            items:
-              - key: token
-                path: token
         - name: proc
           hostPath:
             path: /proc

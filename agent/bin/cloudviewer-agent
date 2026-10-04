@@ -309,10 +309,10 @@ cmd_status() {
 # never run by the package or the config poller: root-side collection is an
 # operator decision on the host itself.
 cmd_enable() {
-    [ "${1:-}" = "disk-health" ] && [ $# -eq 1 ] || {
+    if [ "${1:-}" != "disk-health" ] || [ $# -ne 1 ]; then
         usage >&2
         fail "usage: cloudviewer-agent enable disk-health"
-    }
+    fi
     require_root
     command -v smartctl >/dev/null 2>&1 ||
         fail "smartctl not found — install smartmontools first (apt install smartmontools / dnf install smartmontools), then re-run"
@@ -323,10 +323,10 @@ cmd_enable() {
 }
 
 cmd_disable() {
-    [ "${1:-}" = "disk-health" ] && [ $# -eq 1 ] || {
+    if [ "${1:-}" != "disk-health" ] || [ $# -ne 1 ]; then
         usage >&2
         fail "usage: cloudviewer-agent disable disk-health"
-    }
+    fi
     require_root
     "$SYSTEMCTL" disable --now "$DISK_HEALTH_TIMER"
     log "Disk health disabled (no more SMART reads; the last result expires at reboot)."

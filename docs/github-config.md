@@ -115,7 +115,9 @@ repo's README) so a swapped key is visible in three places at once.
 Settings → Rules → Rulesets.
 
 - [ ] **Branch ruleset for `main`**: block force pushes and deletion;
-      require the CI status check to pass before merge. (Direct pushes by
+      require the CI status check to pass before merge. That check is the
+      `CI` job at the end of `ci.yml`, which needs every other job: a
+      ruleset names check runs, not workflows. (Direct pushes by
       admins stay allowed — solo-maintainer pragmatism; the status-check
       requirement is the part that must hold.)
 - [ ] **Tag ruleset for `20*`**: restrict creation, update, and deletion

@@ -36,6 +36,7 @@ GET_BASE="https://get.cloudviewer.app"
 FACADE_URL=""
 TOKEN=""
 ENROLL_TOKEN=""
+DISK_HEALTH=""
 MODE="install"
 
 # The old (pre-package) layout, for migration and legacy uninstall.
@@ -50,8 +51,8 @@ usage() {
 Cloud Viewer agent bootstrap
 
 Usage:
-  install:    sh install.sh --token <agent_token> [--facade-url <url>]
-              sh install.sh --enroll-token <fleet_token> [--facade-url <url>]
+  install:    sh install.sh --token <agent_token> [--facade-url <url>] [--with-disk-health]
+              sh install.sh --enroll-token <fleet_token> [--facade-url <url>] [--with-disk-health]
   uninstall:  sh install.sh --uninstall
 
 Options:
@@ -65,6 +66,9 @@ Options:
                       Hetzner Cloud only; dedicated (Robot) servers use
                       --token.
   --facade-url <u>    facade base URL (default https://api.cloudviewer.app)
+  --with-disk-health  also install smartmontools and switch on the local
+                      disk-health collector (SMART, read-only, every 5 min;
+                      the same as `cloudviewer-agent enable disk-health`)
   --uninstall         remove the agent, its config, and its data
   --help              show this help
 EOF
@@ -92,6 +96,10 @@ while [ $# -gt 0 ]; do
         [ $# -ge 2 ] || fail "--facade-url needs a value"
         FACADE_URL="${2%/}"
         shift 2
+        ;;
+    --with-disk-health)
+        DISK_HEALTH=1
+        shift
         ;;
     --uninstall)
         MODE="uninstall"
@@ -177,7 +185,8 @@ EOF
     fi
 
     pkg_run apt-get update -qq
-    pkg_run apt-get install -y cloudviewer-agent
+    # shellcheck disable=SC2086 # EXTRA_PKGS is empty or one package name
+    pkg_run apt-get install -y cloudviewer-agent $EXTRA_PKGS
 }
 
 setup_rpm_repos() {
@@ -210,7 +219,8 @@ gpgkey=https://keys.datadoghq.com/DATADOG_RPM_KEY_CURRENT.public
 EOF
     fi
 
-    pkg_run "$1" install -y cloudviewer-agent
+    # shellcheck disable=SC2086 # EXTRA_PKGS is empty or one package name
+    pkg_run "$1" install -y cloudviewer-agent $EXTRA_PKGS
 }
 
 # ---- migration from the pre-package layout ----------------------------------
@@ -270,6 +280,11 @@ install_agent() {
 
     migrate_old_layout
 
+    # smartmontools is only a Recommends of the package (weak dependencies
+    # can be switched off); asking for disk health makes it a requirement.
+    EXTRA_PKGS=""
+    [ -z "$DISK_HEALTH" ] || EXTRA_PKGS="smartmontools"
+
     case "$kind" in
     apt) setup_apt_repos ;;
     dnf) setup_rpm_repos dnf ;;
@@ -302,6 +317,13 @@ install_agent() {
         # runs the fleet flow and ends with the minted token only.
         "$enroll_bin" enroll --quiet
         log "enrolled from the existing agent.env."
+    fi
+
+    # The operator's local switch for the root disk-health collector
+    # (specs/44 §3.1) — after enrollment, so a failed enroll never leaves
+    # a collector running for an agent that does not exist.
+    if [ -n "$DISK_HEALTH" ]; then
+        "$enroll_bin" enable disk-health
     fi
 
     log ""

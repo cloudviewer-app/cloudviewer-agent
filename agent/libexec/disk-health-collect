@@ -1,0 +1,54 @@
+#!/bin/sh
+# shellcheck shell=sh
+# Cloud Viewer disk-health collector — the ONLY root-side piece of disk
+# health (specs/44 §3.1). Started by cloudviewer-disk-health.service
+# (sandboxed and offline), which its timer runs every 5 minutes. Both units
+# ship disabled; the operator switches them on locally with
+# `cloudviewer-agent enable disk-health`.
+#
+# Deliberately inert: no arguments, no inputs, no overrides, nothing read
+# from the config channel or from anything the unprivileged side can
+# write. It runs one program with constant arguments — read-only queries
+# (-i -H -A), never a self-test, and -n standby so a sleeping disk is
+# skipped instead of woken — and writes that program's compact JSON
+# lines unchanged, plus one status line of its own. It does not parse:
+# all interpretation happens later, unprivileged, in Vector's sandboxed
+# VRL. The file is replaced atomically and is world-readable (0644), so
+# the reader (disk-health-read, running as the vector user) never sees a
+# half-written run.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+
+dir=/run/cloudviewer-agent
+tmp="$(mktemp "$dir/.disk-health.XXXXXX")" || exit 1
+trap 'rm -f "$tmp"' EXIT
+
+if command -v smartctl >/dev/null 2>&1; then
+    scan="$(smartctl --scan -j)"
+    scan_rc=$?
+    # Device names only, from the scan's "name" keys, kept only when they
+    # match the fixed whole-disk pattern (no partitions, no RAID passthrough).
+    devices="$(printf '%s\n' "$scan" |
+        sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*$/\1/p' |
+        grep -E '^/dev/(nvme[0-9]+|sd[a-z]+)$' | sort -u)"
+    n=0
+    for dev in $devices; do
+        # smartctl's exit status is a bit field (8 = "disk failing") and
+        # is part of its JSON, so a non-zero exit is data, not an error.
+        printf '%s\n' "$(smartctl --json=c -i -H -A -n standby "$dev")" >>"$tmp"
+        n=$((n + 1))
+    done
+    status=ok
+    [ "$scan_rc" -eq 0 ] || status="scan failed"
+    printf '{"cloudviewer_disk_health":{"time":%s,"status":"%s","scan_exit_status":%s,"devices":%s}}\n' \
+        "$(date +%s)" "$status" "$scan_rc" "$n" >>"$tmp"
+else
+    printf '{"cloudviewer_disk_health":{"time":%s,"status":"smartctl missing"}}\n' \
+        "$(date +%s)" >"$tmp"
+fi
+
+chmod 0644 "$tmp"
+mv -f "$tmp" "$dir/disk-health.ndjson"
+trap - EXIT

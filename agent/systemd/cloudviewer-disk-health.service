@@ -1,0 +1,60 @@
+# Disk-health collector (specs/44 §3.1): runs smartctl with fixed,
+# read-only arguments and writes its raw JSON to /run/cloudviewer-agent
+# for the unprivileged Vector to read. Root, because SMART needs
+# CAP_SYS_ADMIN (NVMe admin passthrough) and CAP_SYS_RAWIO (SATA/SAS) —
+# and nothing beyond those two: the bounding set below drops every other
+# capability, there is no network and no socket at all, the whole
+# filesystem is read-only except the one output directory, only disk
+# devices are reachable, read-only, and system calls are limited to
+# @system-service minus @privileged and @resources (ioctl, which SMART
+# uses, stays allowed).
+#
+# Shipped DISABLED, and nothing in this package enables it: the operator
+# switches it on locally (`cloudviewer-agent enable disk-health`, or the
+# bootstrap's --with-disk-health). The facade can turn the *shipping* of
+# the collected data on or off, never this unit.
+#
+# Every [Service] directive is pinned by tests/run.sh; the
+# `systemd-analyze security` exposure score is recorded there and gated in
+# the release workflow so it can only get better.
+[Unit]
+Description=Cloud Viewer disk-health collector (SMART, read-only)
+Documentation=https://github.com/cloudviewer-app/cloudviewer-agent
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/cloudviewer-agent/disk-health-collect
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO
+AmbientCapabilities=
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=none
+IPAddressDeny=any
+ProtectSystem=strict
+ReadWritePaths=/run/cloudviewer-agent
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+DevicePolicy=closed
+DeviceAllow=block-blkext r
+DeviceAllow=block-sd r
+DeviceAllow=char-nvme r
+TimeoutStartSec=60
+MemoryMax=64M
+Nice=10

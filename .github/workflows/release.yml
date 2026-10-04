@@ -41,7 +41,7 @@ jobs:
       - name: shellcheck + POSIX parse
         run: |
           set -eu
-          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config"
+          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config agent/libexec/render-config agent/libexec/fleet-enroll agent/libexec/disk-health-collect agent/libexec/disk-health-read"
           for f in packaging/scripts/*; do
             if [ -f "$f" ]; then scripts="$scripts $f"; fi
           done
@@ -50,9 +50,22 @@ jobs:
             shellcheck --shell=sh "$f"
             dash -n "$f"
           done
-          shellcheck tests/run.sh
+          shellcheck tests/run.sh tests/vector.sh
       - name: harness (stub facade on loopback)
         run: bash tests/run.sh
+      - name: vector validate + VRL unit tests + disk-health e2e
+        run: bash tests/vector.sh
+      - name: disk-health unit exposure never gets worse
+        # specs/44 §9: `systemd-analyze security` of the root collector's
+        # unit, recorded as 1.3 ("OK") with the specs/44 §3.1 directives
+        # (systemd 255, ubuntu-24.04; 257 gives the same). --threshold is
+        # that score x10: a change that raises the exposure fails the
+        # release. Lower it whenever the unit improves. What is left is what
+        # SMART needs: root, CAP_SYS_ADMIN/CAP_SYS_RAWIO and the disks.
+        run: |
+          set -eu
+          systemd-analyze --version | head -n 1
+          systemd-analyze security --offline=yes --threshold=13 agent/systemd/cloudviewer-disk-health.service
 
   build-packages:
     needs: verify

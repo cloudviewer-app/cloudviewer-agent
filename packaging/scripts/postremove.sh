@@ -31,7 +31,7 @@ cleanup() {
             fi
         fi
     fi
-    rm -rf /etc/cloudviewer-agent /var/lib/cloudviewer-agent
+    rm -rf /etc/cloudviewer-agent /var/lib/cloudviewer-agent /run/cloudviewer-agent
 }
 
 case "${1:-}" in

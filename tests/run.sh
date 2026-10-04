@@ -59,6 +59,76 @@ grep -q "journald" "$TMP/rendered.free" && fail "free must not render a log pipe
 grep -q "golden-token" "$TMP/rendered.free" || fail "token must be injected locally into the sink headers"
 ok "renderer → golden fixtures match for free/pro/team"
 
+# ---- 0b. disk health in the renderer (specs/44 §3.2) ------------------------
+# manifest_version 2 adds exactly one bool, ships_disk_health. With it false
+# the render is byte-identical to version 1; with it true it adds one exec
+# source whose command is a literal of render-config's own template — and
+# only when the reader helper is installed.
+
+render() { # render <libexec-dir> <manifest-file>
+    env CV_AGENT_TOKEN=golden-token CV_AGENT_FACADE_URL=https://api.example.test \
+        CV_AGENT_LIBEXEC_DIR="$1" sh "$RENDERER" "$2"
+}
+write_manifest_v2() { # write_manifest_v2 <tier> <ships_disk_health value>
+    write_manifest "$1" | sed 's/^manifest_version=1$/manifest_version=2/'
+    printf 'ships_disk_health=%s\n' "$2"
+}
+LIBEXEC_WITH_READER="$REPO_DIR/agent/libexec"
+[ -x "$LIBEXEC_WITH_READER/disk-health-read" ] || fail "agent/libexec/disk-health-read must be executable"
+mkdir -p "$TMP/libexec-without-reader"
+
+for tier in free pro team; do
+    write_manifest_v2 "$tier" false >"$TMP/manifest.v2.$tier.off"
+    render "$LIBEXEC_WITH_READER" "$TMP/manifest.v2.$tier.off" >"$TMP/rendered.v2.$tier.off" ||
+        fail "renderer failed for v2 $tier off"
+    diff -u "$GOLDEN_DIR/$tier.yaml" "$TMP/rendered.v2.$tier.off" ||
+        fail "v2 with ships_disk_health=false must render exactly like v1 ($tier)"
+    write_manifest_v2 "$tier" true >"$TMP/manifest.v2.$tier.on"
+    render "$LIBEXEC_WITH_READER" "$TMP/manifest.v2.$tier.on" >"$TMP/rendered.v2.$tier.on" ||
+        fail "renderer failed for v2 $tier on"
+done
+for tier in free pro; do
+    diff -u "$GOLDEN_DIR/$tier-disk-health.yaml" "$TMP/rendered.v2.$tier.on" ||
+        fail "rendered $tier+disk-health config drifted from tests/golden/$tier-disk-health.yaml"
+done
+ok "renderer → manifest v2: disk health off = v1 goldens, on = disk-health goldens"
+
+# Key true, helper absent (e.g. the container image, or a package older
+# than the facade): no exec source at all — byte-identical to the off render.
+for tier in free pro team; do
+    render "$TMP/libexec-without-reader" "$TMP/manifest.v2.$tier.on" >"$TMP/rendered.v2.$tier.noreader" ||
+        fail "renderer failed for v2 $tier without the reader"
+    diff -u "$GOLDEN_DIR/$tier.yaml" "$TMP/rendered.v2.$tier.noreader" ||
+        fail "ships_disk_health=true without the reader must render no disk-health pipeline ($tier)"
+    grep -q "type: exec" "$TMP/rendered.v2.$tier.noreader" && fail "exec source rendered without the reader ($tier)"
+done
+ok "renderer → ships_disk_health=true but reader absent → no exec source"
+
+# Across every manifest the fixtures cover, the only exec source anywhere
+# is disk_health, and its command line is byte-equal to the template's one
+# literal command line (no manifest string can reach it).
+template_cmd="$(grep -E '^ +command: ' "$RENDERER")"
+[ "$(printf '%s\n' "$template_cmd" | wc -l | tr -d ' ')" = 1 ] ||
+    fail "render-config must contain exactly one command: literal"
+[ "$template_cmd" = '    command: ["/usr/libexec/cloudviewer-agent/disk-health-read"]' ] ||
+    fail "the template's command literal changed: $template_cmd"
+exec_renders=0
+for f in "$TMP"/rendered.*; do
+    n_exec="$(grep -c '^    type: exec$' "$f" || true)"
+    if [ "$n_exec" = 0 ]; then
+        grep -q 'command:' "$f" && fail "$(basename "$f"): command without an exec source"
+        continue
+    fi
+    [ "$n_exec" = 1 ] || fail "$(basename "$f"): more than one exec source"
+    exec_renders=$((exec_renders + 1))
+    [ "$(grep -E '^ +command: ' "$f")" = "$template_cmd" ] ||
+        fail "$(basename "$f"): rendered command differs from the template literal"
+    grep -qx '      exec_interval_secs: 300' "$f" || fail "$(basename "$f"): interval must be the template's 300 s"
+    grep -qx '    mode: scheduled' "$f" || fail "$(basename "$f"): exec source must be scheduled"
+done
+[ "$exec_renders" = 3 ] || fail "expected 3 renders with the exec source, got $exec_renders"
+ok "renderer → exec command byte-equal to the template literal in every render ($exec_renders with disk health)"
+
 # ---- fixture: stub facade ---------------------------------------------------
 
 write_manifest pro >"$TMP/config.yaml"
@@ -353,8 +423,35 @@ set -e
 echo "$out" | grep -q "refusing to enroll" || fail "enroll must explain the refusal: $out"
 [ ! -f "$TMP/etc-hostile/vector.yaml" ] || fail "hostile manifest must not produce a config at enroll"
 
+# ships_disk_health is a bool (specs/44 §3.2/§9): a string, a number or an
+# object is a schema violation like any other — rejected, last config kept.
+for bad in '"true"' 'yes' 'TRUE' '1' '0' '{"enabled":true}' '["/bin/sh"]' '' 'true ' \
+    '/usr/libexec/cloudviewer-agent/disk-health-read'; do
+    { write_manifest team | sed 's/^manifest_version=1$/manifest_version=2/'; printf 'ships_disk_health=%s\n' "$bad"; } >"$TMP/config.yaml"
+    expect_rejected "ships_disk_health=$bad"
+done
+# Required in v2, unknown in v1, and never twice.
+write_manifest team | sed 's/^manifest_version=1$/manifest_version=2/' >"$TMP/config.yaml"
+expect_rejected "manifest_version 2 without ships_disk_health"
+{ write_manifest team; printf 'ships_disk_health=true\n'; } >"$TMP/config.yaml"
+expect_rejected "ships_disk_health in a version-1 manifest"
+{ write_manifest team | sed 's/^manifest_version=1$/manifest_version=2/'; printf 'ships_disk_health=false\nships_disk_health=true\n'; } >"$TMP/config.yaml"
+expect_rejected "duplicate ships_disk_health"
+grep -q "type: exec" "$ETC/vector.yaml" && fail "a rejected disk-health manifest must not have rendered anything"
+
+# The facade's whole lever, both directions: true adds the reader's exec
+# source to the metrics pipeline within one poll, false removes it again.
+{ write_manifest team | sed 's/^manifest_version=1$/manifest_version=2/'; printf 'ships_disk_health=true\n'; } >"$TMP/config.yaml"
+run_poller
+grep -qx '    type: exec' "$ETC/vector.yaml" || fail "ships_disk_health=true must render the exec source"
+grep -qx '    inputs: \[host_metrics, disk_health_metrics\]' "$ETC/vector.yaml" ||
+    fail "disk-health gauges must feed the metrics sink"
+{ write_manifest team | sed 's/^manifest_version=1$/manifest_version=2/'; printf 'ships_disk_health=false\n'; } >"$TMP/config.yaml"
+run_poller
+grep -q "disk_health" "$ETC/vector.yaml" && fail "ships_disk_health=false must remove the disk-health pipeline"
+
 write_manifest team >"$TMP/config.yaml"
-ok "manifest schema → unknown keys/versions and config injection rejected at poll and enroll"
+ok "manifest schema → unknown keys/versions, config injection, non-bool ships_disk_health rejected; disk health toggles within one poll"
 
 # ---- 6c. render: package upgrade re-applies the template offline ------------
 
@@ -429,6 +526,210 @@ echo "$out" | grep -q JOB_RAN || fail "unreadable agent.env: the job must still 
 [ "$wrapper_ec" = "0" ] || fail "unreadable agent.env: want job's exit 0, got $wrapper_ec"
 ok "cloudviewer-report → reports, propagates exit codes, never kills the job"
 
+# ---- 8b. disk health: the operator's local switch (specs/44 §3.1) ----------
+
+mkdir -p "$TMP/smartbin" "$TMP/emptybin"
+cat >"$TMP/smartbin/smartctl" <<EOF
+#!/bin/sh
+echo "\$*" >>"$TMP/smartctl.log"
+case "\$*" in
+"--scan -j")
+    printf '{\n  "json_format_version": [\n    1,\n    0\n  ],\n  "devices": [\n'
+    for d in /dev/nvme0 /dev/sda1 /dev/bus/0 /dev/sdb /dev/nvme0n1 /dev/nvme0; do
+        printf '    {\n      "name": "%s",\n      "info_name": "%s",\n      "type": "x"\n    },\n' "\$d" "\$d"
+    done
+    printf '  ]\n}\n'
+    ;;
+*" /dev/nvme0") printf '{"smartctl":{"exit_status":8},"device":{"name":"/dev/nvme0"}}' ; exit 8 ;;
+*" /dev/sdb") printf '{"smartctl":{"exit_status":2},"device":{"name":"/dev/sdb"}}\n' ; exit 2 ;;
+*) echo "unexpected smartctl argv: \$*" >&2; exit 64 ;;
+esac
+EOF
+chmod +x "$TMP/smartbin/smartctl"
+
+: >"$TMP/systemctl.log"
+out="$(env CV_AGENT_ETC_DIR="$ETC" CV_AGENT_SYSTEMCTL="$TMP/bin/systemctl" PATH="$TMP/smartbin:$PATH" \
+    sh "$CTL" enable disk-health)"
+grep -qx "enable --now cloudviewer-disk-health.timer" "$TMP/systemctl.log" || fail "enable disk-health must enable the timer"
+echo "$out" | grep -q "disable disk-health" || fail "enable must say how to switch it off again: $out"
+: >"$TMP/systemctl.log"
+env CV_AGENT_ETC_DIR="$ETC" CV_AGENT_SYSTEMCTL="$TMP/bin/systemctl" sh "$CTL" disable disk-health >/dev/null
+grep -qx "disable --now cloudviewer-disk-health.timer" "$TMP/systemctl.log" || fail "disable disk-health must disable the timer"
+
+# No smartctl → refuse with the package hint, touch no unit. (PATH holds no
+# smartctl at all; the ctl needs no external command on this path.)
+: >"$TMP/systemctl.log"
+set +e
+out="$(env CV_AGENT_ETC_DIR="$ETC" CV_AGENT_SYSTEMCTL="$TMP/bin/systemctl" PATH="$TMP/emptybin" \
+    /bin/sh "$CTL" enable disk-health 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "enable disk-health without smartctl must fail"
+echo "$out" | grep -q "install smartmontools" || fail "missing smartmontools hint: $out"
+[ ! -s "$TMP/systemctl.log" ] || fail "enable without smartctl must not touch any unit"
+set +e
+env CV_AGENT_ETC_DIR="$ETC" CV_AGENT_SYSTEMCTL="$TMP/bin/systemctl" sh "$CTL" enable something-else >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "enable accepts only disk-health"
+[ ! -s "$TMP/systemctl.log" ] || fail "an unknown feature must not touch any unit"
+ok "enable/disable disk-health → timer switched locally; refused without smartctl"
+
+# Bootstrap --with-disk-health (dnf path: no network in the bootstrap's rpm
+# repo setup, so the stubbed package manager is all it touches).
+cat >"$TMP/bin/pkg" <<EOF
+#!/bin/sh
+echo "pkg \$*" >>"$TMP/bootstrap.log"
+EOF
+cat >"$TMP/bin/enroll-bin" <<EOF
+#!/bin/sh
+echo "ctl \$*" >>"$TMP/bootstrap.log"
+EOF
+chmod +x "$TMP/bin/pkg" "$TMP/bin/enroll-bin"
+run_bootstrap() {
+    rm -rf "${TMP:?}/root" "${TMP:?}/bootstrap.log"
+    env CV_AGENT_ROOT="$TMP/root" CV_AGENT_SYSTEMCTL="$TMP/bin/systemctl" CV_AGENT_PKG="$TMP/bin/pkg" \
+        CV_AGENT_PKG_KIND=dnf CV_AGENT_ENROLL_BIN="$TMP/bin/enroll-bin" \
+        sh "$REPO_DIR/install.sh" "$@" >/dev/null
+}
+run_bootstrap --token good-token --with-disk-health
+printf '%s\n' "pkg dnf install -y cloudviewer-agent smartmontools" "ctl enroll --token good-token" \
+    "ctl enable disk-health" | diff -u - "$TMP/bootstrap.log" ||
+    fail "--with-disk-health must install smartmontools and enable disk health after enrolling"
+run_bootstrap --token good-token
+printf '%s\n' "pkg dnf install -y cloudviewer-agent" "ctl enroll --token good-token" | diff -u - "$TMP/bootstrap.log" ||
+    fail "without --with-disk-health the bootstrap must not touch disk health"
+ok "bootstrap --with-disk-health → smartmontools installed, disk health enabled after enroll; off by default"
+
+# ---- 8c. disk health: collector and reader ----------------------------------
+# Neither script takes any override (the collector runs as root), so the
+# harness runs copies with their path constants rewritten — exactly those
+# lines and nothing else (tests/vector.sh runs the unmodified scripts as
+# root in a container).
+
+COLLECT="$REPO_DIR/agent/libexec/disk-health-collect"
+READER="$REPO_DIR/agent/libexec/disk-health-read"
+mkdir -p "$TMP/run"
+rewrite_collector() { # rewrite_collector <PATH value>
+    sed -e "s#^PATH=/usr/sbin:/usr/bin:/sbin:/bin\$#PATH=$1#" -e "s#^dir=/run/cloudviewer-agent\$#dir=$TMP/run#" \
+        "$COLLECT" >"$TMP/collect.sh"
+    [ "$(diff "$COLLECT" "$TMP/collect.sh" | grep -c '^>')" = 2 ] || fail "collector constants moved; update the harness rewrite"
+}
+
+rewrite_collector "$TMP/smartbin:/usr/bin:/bin"
+: >"$TMP/smartctl.log"
+sh "$TMP/collect.sh" || fail "collector failed"
+printf '%s\n' "--scan -j" "--json=c -i -H -A -n standby /dev/nvme0" "--json=c -i -H -A -n standby /dev/sdb" |
+    diff -u - "$TMP/smartctl.log" || fail "collector must run only the fixed smartctl argv, whole disks only, each once"
+f="$TMP/run/disk-health.ndjson"
+[ "$(file_mode "$f")" = "644" ] || fail "disk-health.ndjson must be 0644"
+[ "$(find "$TMP/run" -type f | wc -l | tr -d ' ')" = 1 ] || fail "collector left temp files behind"
+[ "$(wc -l <"$f" | tr -d ' ')" = 3 ] || fail "want one line per device plus the status line"
+[ "$(sed -n 1p "$f")" = '{"smartctl":{"exit_status":8},"device":{"name":"/dev/nvme0"}}' ] ||
+    fail "smartctl output must be written unchanged (one line each, even without a trailing newline)"
+sed -n 3p "$f" | grep -Eq '^\{"cloudviewer_disk_health":\{"time":[0-9]+,"status":"ok","scan_exit_status":0,"devices":2\}\}$' ||
+    fail "bad status line: $(sed -n 3p "$f")"
+
+if PATH=/usr/bin:/bin command -v smartctl >/dev/null 2>&1; then
+    echo "skip: smartctl installed in /usr/bin or /bin — cannot simulate its absence here"
+else
+    rewrite_collector "/usr/bin:/bin"
+    sh "$TMP/collect.sh" || fail "collector without smartctl failed"
+    [ "$(wc -l <"$f" | tr -d ' ')" = 1 ] || fail "without smartctl only the status line may be written"
+    grep -Eq '^\{"cloudviewer_disk_health":\{"time":[0-9]+,"status":"smartctl missing"\}\}$' "$f" ||
+        fail "bad smartctl-missing line: $(cat "$f")"
+fi
+ok "collector → fixed argv, device filter, raw lines + status line, atomic 0644; 'smartctl missing' alone"
+
+sed -e "s#/run/cloudviewer-agent/disk-health.ndjson#$TMP/run/disk-health.ndjson#g" -e "s#/proc/mdstat#$TMP/mdstat#g" \
+    "$READER" >"$TMP/read.sh"
+cp "$REPO_DIR/tests/fixtures/disk-health/degraded-mdstat.txt" "$TMP/mdstat"
+sh "$TMP/read.sh" >"$TMP/read.out" || fail "reader failed"
+{ sed 's/^/smart	/' "$f"; sed 's/^/mdstat	/' "$TMP/mdstat"; } | diff -u - "$TMP/read.out" ||
+    fail "reader must print the collector file then mdstat, every line prefixed with its kind"
+rm -f "$f" "$TMP/mdstat"
+sh "$TMP/read.sh" >"$TMP/read.out" || fail "reader must exit 0 with nothing to read"
+[ ! -s "$TMP/read.out" ] || fail "reader printed something with no inputs"
+ok "reader → smart<TAB>/mdstat<TAB> prefixed lines; silent exit 0 when nothing to read"
+
+# ---- 8d. disk health: the trust boundary, statically (specs/44 §3, §9) -----
+
+# The config poller and the renderer never manage units: the only
+# systemctl verb they could ever use is the agent reload.
+for f in "$POLLER" "$RENDERER"; do
+    bad="$(grep -n 'systemctl' "$f" | grep -v 'systemctl reload cloudviewer-agent.service' || true)"
+    [ -z "$bad" ] || fail "$(basename "$f") uses systemctl beyond the agent reload: $bad"
+    bad="$(grep -nE 'systemd-run|systemd-tmpfiles|/systemd/system|disk-health-collect|cloudviewer-disk-health' "$f" || true)"
+    [ -z "$bad" ] || fail "$(basename "$f") reaches for units or the root collector: $bad"
+done
+# Nothing but the ctl (and the bootstrap, through the ctl) enables the units.
+bad="$(grep -nE 'systemctl.*(enable|start).*disk-health' "$POLLER" "$RENDERER" "$REPO_DIR"/packaging/scripts/*.sh \
+    "$REPO_DIR/docker/entrypoint.sh" || true)"
+[ -z "$bad" ] || fail "disk health may only be enabled by the operator's ctl: $bad"
+
+# The collector: no input from the config channel or the vector user, no
+# network, no arguments, no overrides, and smartctl only in its two fixed,
+# read-only forms (no -t self-test, no -s/-S/-o setters).
+bad="$(grep -nEi 'agent\.env|manifest|vector\.yaml|network|curl|wget|https?:|/dev/(tcp|udp)|socat|ssh|CV_AGENT|(^|[^a-z])nc[[:space:]]|\$[1-9@*#]' "$COLLECT" || true)"
+[ -z "$bad" ] || fail "the collector must not reference the config channel, the network or arguments: $bad"
+[ "$(grep -c 'smartctl -' "$COLLECT")" = 2 ] || fail "the collector must invoke smartctl exactly twice"
+# shellcheck disable=SC2016 # literal shell text, matched verbatim
+grep -qF 'scan="$(smartctl --scan -j)"' "$COLLECT" || fail "the scan must be exactly: smartctl --scan -j"
+# shellcheck disable=SC2016 # literal shell text, matched verbatim
+grep -qF '"$(smartctl --json=c -i -H -A -n standby "$dev")"' "$COLLECT" ||
+    fail "the query must be exactly: smartctl --json=c -i -H -A -n standby <dev>"
+grep -qF "grep -E '^/dev/(nvme[0-9]+|sd[a-z]+)\$'" "$COLLECT" || fail "the device filter must be the specs/44 pattern"
+
+# The unit: exactly the specs/44 §3.1 [Service] directives, and no [Install]
+# (only the timer is installable, and nothing but the ctl installs it).
+cat >"$TMP/service.want" <<'EOF'
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/cloudviewer-agent/disk-health-collect
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO
+AmbientCapabilities=
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=none
+IPAddressDeny=any
+ProtectSystem=strict
+ReadWritePaths=/run/cloudviewer-agent
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+DevicePolicy=closed
+DeviceAllow=block-blkext r
+DeviceAllow=block-sd r
+DeviceAllow=char-nvme r
+TimeoutStartSec=60
+MemoryMax=64M
+Nice=10
+EOF
+UNIT_DIR="$REPO_DIR/agent/systemd"
+sed -n '/^\[Service\]/,$p' "$UNIT_DIR/cloudviewer-disk-health.service" | grep -v -e '^#' -e '^$' |
+    diff -u "$TMP/service.want" - || fail "cloudviewer-disk-health.service drifted from specs/44 §3.1"
+grep -q '^\[Install\]' "$UNIT_DIR/cloudviewer-disk-health.service" && fail "the collector service must not be installable"
+grep -qx 'OnUnitActiveSec=5min' "$UNIT_DIR/cloudviewer-disk-health.timer" || fail "the timer must run every 5 minutes"
+{ grep -qx 'recommends:' "$REPO_DIR/packaging/nfpm.yaml" && grep -qx '  - smartmontools' "$REPO_DIR/packaging/nfpm.yaml"; } ||
+    fail "the package must Recommend smartmontools"
+ok "trust boundary → poller/renderer manage no units, collector fixed and offline, unit = specs/44 §3.1"
+
 # ---- 9. uninstall: deregisters, removes runtime state, hints at purge -------
 
 uninstall_out="$(run_ctl uninstall)"
@@ -436,6 +737,8 @@ uninstall_out="$(run_ctl uninstall)"
 [ ! -e "$DATA" ] || fail "uninstall left the data dir"
 grep -q "^disable --now cloudviewer-agent.service cloudviewer-agent-config.timer$" "$TMP/systemctl.log" ||
     fail "units not disabled on uninstall"
+grep -q "^disable --now cloudviewer-disk-health.timer$" "$TMP/systemctl.log" ||
+    fail "uninstall must also switch off disk health"
 grep -q "^good-token$" "$TMP/deregister.log" 2>/dev/null ||
     fail "uninstall did not deregister with the agent token"
 echo "$uninstall_out" | grep -q "deregistered" || fail "uninstall output must confirm deregistration"

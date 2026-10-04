@@ -1,0 +1,113 @@
+{
+ "json_format_version": [
+  1,
+  0
+ ],
+ "smartctl": {
+  "version": [
+   7,
+   4
+  ],
+  "pre_release": false,
+  "svn_revision": "5530",
+  "platform_info": "x86_64-linux-6.8.0-139-generic",
+  "build_info": "(local build)",
+  "exit_status": 8
+ },
+ "device": {
+  "name": "/dev/nvme0",
+  "info_name": "/dev/nvme0",
+  "type": "nvme",
+  "protocol": "NVMe"
+ },
+ "model_name": "SAMSUNG MZVLB512HBJQ-00007",
+ "serial_number": "FIXTURE-R2-N0",
+ "firmware_version": "EXF7202Q",
+ "nvme_pci_vendor": {
+  "id": 5197,
+  "subsystem_id": 5197
+ },
+ "nvme_ieee_oui_identifier": 9528,
+ "nvme_total_capacity": 512110190592,
+ "nvme_unallocated_capacity": 0,
+ "nvme_controller_id": 4,
+ "nvme_version": {
+  "string": "1.3",
+  "value": 66304
+ },
+ "nvme_number_of_namespaces": 1,
+ "nvme_namespaces": [
+  {
+   "id": 1,
+   "size": {
+    "blocks": 1000215216,
+    "bytes": 512110190592
+   },
+   "capacity": {
+    "blocks": 1000215216,
+    "bytes": 512110190592
+   },
+   "utilization": {
+    "blocks": 814941048,
+    "bytes": 417249816576
+   },
+   "formatted_lba_size": 512,
+   "eui64": {
+    "oui": 0,
+    "ext_id": 0
+   }
+  }
+ ],
+ "user_capacity": {
+  "blocks": 1000215216,
+  "bytes": 512110190592
+ },
+ "logical_block_size": 512,
+ "smart_support": {
+  "available": true,
+  "enabled": true
+ },
+ "smart_status": {
+  "passed": false,
+  "nvme": {
+   "value": 4,
+   "spare_below_threshold": false,
+   "temperature_above_or_below_threshold": false,
+   "reliability_degraded": true,
+   "media_read_only": false,
+   "volatile_memory_backup_failed": false,
+   "persistent_memory_region_unreliable": false,
+   "other": 0
+  }
+ },
+ "nvme_smart_health_information_log": {
+  "critical_warning": 4,
+  "temperature": 28,
+  "available_spare": 100,
+  "available_spare_threshold": 10,
+  "percentage_used": 171,
+  "data_units_read": 245366925,
+  "data_units_written": 560067656,
+  "host_reads": 2070900119,
+  "host_writes": 11185380621,
+  "controller_busy_time": 1451051826892,
+  "power_cycles": 12,
+  "power_on_hours": 43996,
+  "unsafe_shutdowns": 1,
+  "media_errors": 0,
+  "num_err_log_entries": 117,
+  "warning_temp_time": 0,
+  "critical_comp_time": 0,
+  "temperature_sensors": [
+   28,
+   25
+  ]
+ },
+ "temperature": {
+  "current": 28
+ },
+ "power_cycle_count": 12,
+ "power_on_time": {
+  "hours": 43996
+ }
+}

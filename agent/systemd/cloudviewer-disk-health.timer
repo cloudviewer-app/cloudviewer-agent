@@ -1,0 +1,13 @@
+# Runs the disk-health collector every 5 minutes (specs/44 §3.1). Shipped
+# DISABLED: only `cloudviewer-agent enable disk-health` (or the bootstrap's
+# --with-disk-health) on the host itself enables it — never the package,
+# never the config poller.
+[Unit]
+Description=Collect disk health (SMART) for the Cloud Viewer agent
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

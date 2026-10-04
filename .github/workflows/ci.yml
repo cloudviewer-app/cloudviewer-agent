@@ -40,7 +40,7 @@ jobs:
           # scriptlet ever executes. A fixed list on purpose: a lint gate
           # that discovers its own inputs can silently lint nothing, and
           # shellcheck failing on a missing file keeps the list honest.
-          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config agent/libexec/render-config agent/libexec/fleet-enroll packaging/scripts/postinstall.sh packaging/scripts/preremove.sh packaging/scripts/postremove.sh"
+          scripts="install.sh docker/entrypoint.sh agent/bin/cloudviewer-agent agent/bin/cloudviewer-report agent/libexec/fetch-config agent/libexec/render-config agent/libexec/fleet-enroll agent/libexec/disk-health-collect agent/libexec/disk-health-read packaging/scripts/postinstall.sh packaging/scripts/preremove.sh packaging/scripts/postremove.sh"
           for f in packaging/scripts/*; do
             if [ -f "$f" ]; then scripts="$scripts $f"; fi
           done
@@ -53,7 +53,11 @@ jobs:
           done
           # The test harness is bash by design; shellcheck reads the
           # shebang for the dialect, and dash has no business parsing it.
-          shellcheck tests/run.sh
+          shellcheck tests/run.sh tests/vector.sh
+      - name: disk-health unit exposure never gets worse
+        # Same gate as release.yml (specs/44 §9): the root collector's unit
+        # may not drift above its recorded `systemd-analyze security` score.
+        run: systemd-analyze security --offline=yes --threshold=13 agent/systemd/cloudviewer-disk-health.service
 
   test:
     runs-on: ubuntu-latest
@@ -65,6 +69,21 @@ jobs:
       - name: harness (stub facade on loopback)
         # Self-contained: needs only bash + python3, both preinstalled.
         run: bash tests/run.sh
+
+  vector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+        with:
+          persist-credentials: false
+      - name: vector validate + VRL unit tests + disk-health e2e
+        # The real Vector, from the image docker/Dockerfile pins: every
+        # rendered config shape must load, the disk-health VRL must pass
+        # the specs/44 golden fixtures (`vector test`), and the unmodified
+        # collector → reader → exec source chain runs end to end as root
+        # in a throwaway container. Needs only docker + python3.
+        run: bash tests/vector.sh
 
   package:
     runs-on: ubuntu-latest
@@ -132,3 +151,23 @@ jobs:
         # of the same POSIX scripts lint already covers, so a single-arch
         # build proves the Dockerfile; release.yml does the multi-arch push.
         run: docker build -f docker/Dockerfile -t cloudviewer-agent:ci .
+
+  # The one check the main ruleset requires ("CI", docs/github-config.md):
+  # a ruleset names check runs, not workflows, so without this job the rule
+  # waits for a check that never reports and every PR stays blocked. Green
+  # only when every job above is; always() so a failed or cancelled job
+  # reports a red CI instead of a skipped one, which a ruleset would accept.
+  ci:
+    name: CI
+    if: always()
+    needs: [lint, test, vector, package, chart, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            [ "$r" = success ] || { echo "a required job ended: $r"; exit 1; }
+          done

@@ -14,15 +14,23 @@ contract, verifiable any time with `dpkg -L cloudviewer-agent` /
 `rpm -ql cloudviewer-agent` and `dpkg --verify` / `rpm -V`:
 
 ```
-/usr/bin/cloudviewer-agent                        enroll | status | render | uninstall
+/usr/bin/cloudviewer-agent                        enroll | status | render | enable/disable disk-health | uninstall
 /usr/bin/cloudviewer-report                       cron-job report wrapper
 /usr/libexec/cloudviewer-agent/fetch-config       per-minute manifest poller (ETag GET)
 /usr/libexec/cloudviewer-agent/render-config      manifest → vector.yaml renderer (see Security)
+/usr/libexec/cloudviewer-agent/fleet-enroll       fleet self-registration (shared with the container)
+/usr/libexec/cloudviewer-agent/disk-health-collect  root SMART collector (opt-in, see Disk health)
+/usr/libexec/cloudviewer-agent/disk-health-read   unprivileged reader Vector runs for disk health
 /usr/lib/systemd/system/cloudviewer-agent.service
 /usr/lib/systemd/system/cloudviewer-agent-config.service
 /usr/lib/systemd/system/cloudviewer-agent-config.timer
+/usr/lib/systemd/system/cloudviewer-disk-health.service   shipped disabled
+/usr/lib/systemd/system/cloudviewer-disk-health.timer     shipped disabled
+/usr/lib/tmpfiles.d/cloudviewer-agent.conf        creates /run/cloudviewer-agent
 /usr/share/doc/cloudviewer-agent/README.md        this file
 ```
+
+The package `Recommends: smartmontools` (for disk health; not required).
 
 The Vector binary comes from the `vector` package the above depends on,
 installed from [Vector's own signed repositories](https://vector.dev/docs/setup/installation/).
@@ -105,6 +113,35 @@ already exists at install time.) Ansible: `apt` module + `copy` the env
 file + a handler running `cloudviewer-agent enroll`. Re-running enroll is
 always safe; running it with a new token rotates the token in place.
 
+### Disk health (SMART and software RAID, dedicated servers)
+
+Off until you switch it on, on the server itself:
+
+```sh
+cloudviewer-agent enable disk-health      # or: install.sh ... --with-disk-health
+cloudviewer-agent disable disk-health
+```
+
+This enables a 5-minute timer for `cloudviewer-disk-health.service`, a
+root job (SMART needs `CAP_SYS_ADMIN`/`CAP_SYS_RAWIO`) sandboxed by
+systemd: no network at all, read-only filesystem except
+`/run/cloudviewer-agent`, only disk devices, read-only. It runs
+`smartctl --scan -j`, then `smartctl --json=c -i -H -A -n standby <disk>`
+for each whole disk — identify, health and attributes only, never a
+self-test, never waking a sleeping disk — and writes the raw output to
+`/run/cloudviewer-agent/disk-health.ndjson`. It reads nothing from Cloud
+Viewer. Vector (unprivileged) reads that file and `/proc/mdstat` through
+`disk-health-read` and turns them into gauges: wear, critical warnings,
+media errors, spare, temperature, hours, data written, ATA sector counts,
+and per md array the member counts, degraded state and resync progress.
+Each drive's model and serial number are shipped once (as labels of
+`disk_smart_passed`), because a drive-replacement request needs them.
+
+Shipping additionally needs the facade's `ships_disk_health` parameter
+(your plan); without `smartmontools` the collector only reports
+`smartctl missing`. The container image and Helm chart do not collect disk
+health.
+
 ### Version pinning
 
 The package depends on `vector (>= <tested version>)`; each release train
@@ -149,8 +186,8 @@ node as the same server. Details and caveats:
 ### Other platforms
 
 No apt/dnf (Alpine, NixOS, …): use the container image above, or install
-the files from `agent/` manually — they are plain POSIX sh plus three
-systemd units, and the file list at the top of this page is complete.
+the files from `agent/` manually — they are plain POSIX sh plus five
+systemd units and a tmpfiles.d entry, and the file list at the top of this page is complete.
 
 ## Uninstall
 
@@ -167,8 +204,9 @@ after 72 h) and removes config, token, and buffered data. Plain
 
 - **The facade sends parameters, the host renders the config.** The agent
   never installs server-supplied configuration. It polls a tiny key=value
-  parameter manifest (`tier`, `ships_journald`, `ships_auth_logs`;
-  conditional GET every minute), validates it against a strict schema —
+  parameter manifest (`tier`, `ships_journald`, `ships_auth_logs`,
+  `ships_disk_health`; conditional GET every minute), validates it
+  against a strict schema —
   unknown key, unknown version, or anything that is not a manifest is
   rejected and the last config kept — and `render-config` renders
   `vector.yaml` locally, injecting the token and facade URL from
@@ -177,8 +215,16 @@ after 72 h) and removes config, token, and buffered data. Plain
   pinned by the golden fixtures in `tests/golden/`; a compromised server
   can at worst flip the documented toggles, never deliver components,
   paths, sinks, or code.
-- **Nothing runs as root after enrollment — two unprivileged users, on
-  purpose.** The collector service runs as the `vector` user (journald +
+- **Disk health keeps the facade away from root.** Its one root piece,
+  the SMART collector, ships disabled, is enabled only by you on the host,
+  takes no input, has no network, and runs `smartctl` with fixed read-only
+  arguments. The facade's `ships_disk_health` bool only decides whether the
+  unprivileged Vector *reads* the result, via a helper at a fixed path that
+  the renderer adds only if it is installed — no manifest string reaches
+  that config, and the poller and renderer never touch systemd units
+  (pinned by `tests/run.sh`).
+- **Nothing runs as root after enrollment (except the opt-in disk-health
+  collector above) — two unprivileged users, on purpose.** The collector service runs as the `vector` user (journald +
   auth.log access via its groups), with `NoNewPrivileges` and a validated
   config (`vector validate` before every start). The per-minute config
   poller runs as a dedicated `cloudviewer-agent` user that owns
@@ -200,13 +246,15 @@ after 72 h) and removes config, token, and buffered data. Plain
 
 ```sh
 bash tests/run.sh        # full harness: stub facade, no root/systemd needed
+bash tests/vector.sh     # real Vector (docker): validate, VRL unit tests, disk-health e2e
 shellcheck agent/bin/* agent/libexec/* packaging/scripts/*.sh install.sh
 VERSION=0.0.0+dev nfpm package -f packaging/nfpm.yaml -p deb -t dist/
 ```
 
-Everything an installed host runs lives under `agent/` — six small POSIX
-sh files and three units. CI (shellcheck, `dash -n`, the harness, package
-dry-builds, chart lint) runs on every PR.
+Everything an installed host runs lives under `agent/` — seven small POSIX
+sh files, five units and one tmpfiles.d entry. CI (shellcheck, `dash -n`,
+the harness, the Vector tests, the disk-health unit's `systemd-analyze
+security` gate, package dry-builds, chart lint) runs on every PR.
 
 ## License
 

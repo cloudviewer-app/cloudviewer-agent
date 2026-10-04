@@ -18,6 +18,12 @@
 #              config management drop the file, then run `enroll`) — a file
 #              carrying CV_AGENT_ENROLL_TOKEN takes the fleet path.
 #   status     enrolled state, unit health, config freshness.
+#   enable disk-health / disable disk-health
+#              switch the root disk-health collector (SMART via smartctl,
+#              specs/44 §3.1) on or off. It ships disabled and ONLY this
+#              local, root-run command (or the bootstrap's
+#              --with-disk-health) enables it — the facade can toggle the
+#              shipping of what it collects, never the collector itself.
 #   uninstall  deregister, stop the units, remove config/token/data. Package
 #              files stay — remove them with your package manager (apt purge
 #              cloudviewer-agent / dnf remove cloudviewer-agent), whose purge
@@ -44,6 +50,7 @@ LIBEXEC_DIR="${CV_AGENT_LIBEXEC_DIR:-/usr/libexec/cloudviewer-agent}"
 FACADE_DEFAULT="https://api.cloudviewer.app"
 
 UNITS="cloudviewer-agent.service cloudviewer-agent-config.timer"
+DISK_HEALTH_TIMER="cloudviewer-disk-health.timer"
 
 # Sandbox mode: the harness redirects every path and stubs systemctl, so
 # root and a real system layout are only required when nothing is overridden.
@@ -56,6 +63,8 @@ usage:
   cloudviewer-agent enroll [--token <t>] [--facade-url <u>] [--quiet]
   cloudviewer-agent status
   cloudviewer-agent render
+  cloudviewer-agent enable disk-health
+  cloudviewer-agent disable disk-health
   cloudviewer-agent uninstall
   cloudviewer-agent help
 
@@ -73,6 +82,13 @@ enroll options:
                       config-management converge).
   --facade-url <u>    facade base URL (default https://api.cloudviewer.app)
   --quiet             suppress the success banner (for package hooks)
+
+enable disk-health:
+  Starts the disk-health collector: a sandboxed root job without network
+  access that runs `smartctl -i -H -A -n standby` (read-only, never a
+  self-test, never wakes a sleeping disk) every 5 minutes. Needs smartctl
+  (package smartmontools). Shipping its data additionally needs the
+  Cloud Viewer plan to include disk health; `disable disk-health` stops it.
 EOF
 }
 
@@ -284,6 +300,36 @@ cmd_status() {
     if command -v vector >/dev/null 2>&1; then
         log "  vector:   $(vector --version 2>/dev/null || echo unknown)"
     fi
+    state="$("$SYSTEMCTL" is-enabled "$DISK_HEALTH_TIMER" 2>/dev/null || true)"
+    log "  disk health: ${state:-disabled} (cloudviewer-agent enable disk-health)"
+}
+
+# enable/disable disk-health: the operator's local switch for the root
+# collector (specs/44 §3.1). Deliberately a separate command from enroll and
+# never run by the package or the config poller: root-side collection is an
+# operator decision on the host itself.
+cmd_enable() {
+    if [ "${1:-}" != "disk-health" ] || [ $# -ne 1 ]; then
+        usage >&2
+        fail "usage: cloudviewer-agent enable disk-health"
+    fi
+    require_root
+    command -v smartctl >/dev/null 2>&1 ||
+        fail "smartctl not found — install smartmontools first (apt install smartmontools / dnf install smartmontools), then re-run"
+    "$SYSTEMCTL" enable --now "$DISK_HEALTH_TIMER"
+    log "Disk health enabled: SMART is read every 5 minutes (read-only, offline, sandboxed)."
+    log "It is shipped when your Cloud Viewer plan includes disk health; disable with:"
+    log "  cloudviewer-agent disable disk-health"
+}
+
+cmd_disable() {
+    if [ "${1:-}" != "disk-health" ] || [ $# -ne 1 ]; then
+        usage >&2
+        fail "usage: cloudviewer-agent disable disk-health"
+    fi
+    require_root
+    "$SYSTEMCTL" disable --now "$DISK_HEALTH_TIMER"
+    log "Disk health disabled (no more SMART reads; the last result expires at reboot)."
 }
 
 # render: re-render vector.yaml from the CACHED manifest — no network.
@@ -323,6 +369,7 @@ cmd_uninstall() {
     fi
     # shellcheck disable=SC2086 # UNITS is a deliberate two-word list
     "$SYSTEMCTL" disable --now $UNITS 2>/dev/null || true
+    "$SYSTEMCTL" disable --now "$DISK_HEALTH_TIMER" 2>/dev/null || true
     rm -rf "$ETC_DIR" "$DATA_DIR"
     log "Cloud Viewer agent unenrolled (config, token, and buffered data removed)."
     log "Remove the package with your package manager, e.g.:"
@@ -347,6 +394,8 @@ case "$cmd" in
 enroll) cmd_enroll "$@" ;;
 status) cmd_status "$@" ;;
 render) cmd_render "$@" ;;
+enable) cmd_enable "$@" ;;
+disable) cmd_disable "$@" ;;
 uninstall) cmd_uninstall "$@" ;;
 help | --help | -h) usage ;;
 *)

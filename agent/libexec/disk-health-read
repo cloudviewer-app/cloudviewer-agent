@@ -1,0 +1,23 @@
+#!/bin/sh
+# shellcheck shell=sh
+# Cloud Viewer disk-health reader (specs/44 §3.2) — run by Vector's exec
+# source as the unprivileged vector user, at the fixed path the installed
+# config template names. It prints the root collector's last run and the
+# kernel's software-RAID status, each line prefixed with its kind:
+#
+#   smart<TAB><one line of smartctl JSON, or the collector's status line>
+#   mdstat<TAB><one line of /proc/mdstat>
+#
+# Both inputs are world-readable; nothing here needs privileges or parses
+# anything — VRL in the rendered config does that, sandboxed. A missing
+# input (collector not enabled yet, no md driver) just prints nothing for
+# it; the exit status is always 0 so Vector never logs a failure for it.
+set -u
+
+if [ -r /run/cloudviewer-agent/disk-health.ndjson ]; then
+    awk '{ print "smart\t" $0 }' /run/cloudviewer-agent/disk-health.ndjson
+fi
+if [ -r /proc/mdstat ]; then
+    awk '{ print "mdstat\t" $0 }' /proc/mdstat
+fi
+exit 0

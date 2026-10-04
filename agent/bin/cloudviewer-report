@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
         usage; exit 2 ;;
     esac
 done
-[ -n "$JOB" ] && [ $# -gt 0 ] || { usage; exit 2; }
+if [ -z "$JOB" ] || [ $# -eq 0 ]; then usage; exit 2; fi
 
 # --max-age accepts plain seconds or m/h/d suffixes (26h → 93600). A bad
 # value is a usage error and may exit BEFORE the job runs — unlike token

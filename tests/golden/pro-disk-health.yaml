@@ -1,184 +1,20 @@
-#!/bin/sh
-# shellcheck shell=sh
-# Cloud Viewer agent config renderer — the host side of the config trust
-# boundary: THE FACADE SENDS PARAMETERS, THE HOST RENDERS THE CONFIG.
-#
-# Input is the facade's flat key=value parameter manifest (usage:
-# render-config <manifest-file>; rendered vector.yaml on stdout). The
-# manifest is validated against a strict schema first — known keys only,
-# known values only, reject on anything else — so a compromised
-# facade/portal/DB can at worst flip the documented toggles below. It can
-# never introduce component types, paths, sinks, VRL, or code: every
-# structural byte of the rendered config lives in THIS file, shipped by the
-# package, changed only through the operator's own update channel.
-#
-# The agent token and facade URL are injected locally (env, or agent.env in
-# CV_AGENT_ETC_DIR) — they never travel inside a server document.
-#
-# Schema (manifest_version 1 or 2):
-#   manifest_version   literal "1" or "2"
-#   tier               free | pro | team         (comment only)
-#   ships_journald     true | false              (journald source + redaction)
-#   ships_auth_logs    true | false              (auth-log source; implies journald)
-#   ships_disk_health  true | false              (version 2 only, and required
-#                                                 there: SMART + mdstat shipping,
-#                                                 specs/44 §3.2)
-#
-# ships_disk_health is the only lever the facade has over disk health, and
-# it is deliberately weak: it decides whether Vector READS what the
-# operator-enabled root collector already wrote. The exec source it adds
-# runs one fixed, unprivileged helper — the literal path below, never a
-# manifest value — and only when that helper is installed. It cannot
-# enable the collector, change smartctl's arguments, or name a device,
-# path or command. (Test override: CV_AGENT_LIBEXEC_DIR moves where the
-# helper's EXISTENCE is checked; the rendered command stays the literal.)
-set -eu
-
-fail() {
-    printf 'cloudviewer-agent: invalid manifest: %s\n' "$*" >&2
-    exit 1
-}
-
-[ $# -eq 1 ] || {
-    echo "usage: render-config <manifest-file>" >&2
-    exit 2
-}
-[ -r "$1" ] || fail "cannot read $1"
-
-# ---- validate ---------------------------------------------------------------
-
-MANIFEST_VERSION=""
-TIER=""
-SHIPS_JOURNALD=""
-SHIPS_AUTH_LOGS=""
-SHIPS_DISK_HEALTH=""
-SEEN_DISK_HEALTH=""
-
-while IFS= read -r line || [ -n "$line" ]; do
-    key="${line%%=*}"
-    val="${line#*=}"
-    case "$key" in
-    manifest_version)
-        [ -z "$MANIFEST_VERSION" ] || fail "duplicate key manifest_version"
-        MANIFEST_VERSION="$val"
-        ;;
-    tier)
-        [ -z "$TIER" ] || fail "duplicate key tier"
-        TIER="$val"
-        ;;
-    ships_journald)
-        [ -z "$SHIPS_JOURNALD" ] || fail "duplicate key ships_journald"
-        SHIPS_JOURNALD="$val"
-        ;;
-    ships_auth_logs)
-        [ -z "$SHIPS_AUTH_LOGS" ] || fail "duplicate key ships_auth_logs"
-        SHIPS_AUTH_LOGS="$val"
-        ;;
-    ships_disk_health)
-        [ -z "$SEEN_DISK_HEALTH" ] || fail "duplicate key ships_disk_health"
-        SEEN_DISK_HEALTH=1
-        SHIPS_DISK_HEALTH="$val"
-        ;;
-    *)
-        fail "unknown key '$key'"
-        ;;
-    esac
-done <"$1"
-
-case "$MANIFEST_VERSION" in
-1)
-    # Version 1 predates disk health: the key is unknown there.
-    [ -z "$SEEN_DISK_HEALTH" ] || fail "ships_disk_health requires manifest_version 2"
-    SHIPS_DISK_HEALTH=false
-    ;;
-2)
-    # A bool, spelled exactly true or false — a string, number or object
-    # (\"true\", 1, {...}) is rejected like any other schema violation.
-    case "$SHIPS_DISK_HEALTH" in true | false) ;; *) fail "ships_disk_health must be true or false" ;; esac
-    ;;
-*)
-    fail "unsupported manifest_version '$MANIFEST_VERSION' (this agent understands 1 and 2 — update the package)"
-    ;;
-esac
-case "$TIER" in free | pro | team) ;; *) fail "unknown tier '$TIER'" ;; esac
-case "$SHIPS_JOURNALD" in true | false) ;; *) fail "ships_journald must be true or false" ;; esac
-case "$SHIPS_AUTH_LOGS" in true | false) ;; *) fail "ships_auth_logs must be true or false" ;; esac
-if [ "$SHIPS_AUTH_LOGS" = "true" ] && [ "$SHIPS_JOURNALD" = "false" ]; then
-    fail "ships_auth_logs without ships_journald (facade never emits this shape)"
-fi
-
-# ---- local identity ---------------------------------------------------------
-
-ETC_DIR="${CV_AGENT_ETC_DIR:-/etc/cloudviewer-agent}"
-if [ -z "${CV_AGENT_TOKEN:-}" ] && [ -r "$ETC_DIR/agent.env" ]; then
-    # shellcheck disable=SC1091 # written by `cloudviewer-agent enroll`
-    . "$ETC_DIR/agent.env"
-fi
-TOKEN="${CV_AGENT_TOKEN:-}"
-BASE="${CV_AGENT_FACADE_URL:-}"
-[ -n "$TOKEN" ] || fail "no agent token (CV_AGENT_TOKEN or $ETC_DIR/agent.env)"
-[ -n "$BASE" ] || fail "no facade URL (CV_AGENT_FACADE_URL or $ETC_DIR/agent.env)"
-DATA_DIR="${CV_AGENT_DATA_DIR:-/var/lib/cloudviewer-agent}"
-
-# Disk health renders only when the facade asks for it AND this package's
-# reader is installed (the container image does not ship it, so it never
-# renders there). Both keys are needed; neither supplies any string.
-DISK_HEALTH=false
-if [ "$SHIPS_DISK_HEALTH" = "true" ] &&
-    [ -x "${CV_AGENT_LIBEXEC_DIR:-/usr/libexec/cloudviewer-agent}/disk-health-read" ]; then
-    DISK_HEALTH=true
-fi
-
-# ---- render -----------------------------------------------------------------
-# The redaction VRL below is pinned byte-for-byte against the facade's rule
-# table (facade TestRedactVRLParity + this repo's golden fixtures): the
-# same rules run again at ingest, so hosts on an older package are still
-# covered server-side. Patterns write apostrophes as \x27 (a literal '
-# would end the VRL raw string) and contain no $ (Vector env
-# interpolation) — the quoted heredocs below preserve them verbatim.
-
-cat <<EOF
 # Cloud Viewer agent configuration — rendered locally by cloudviewer-agent
-# from the facade's parameter manifest (tier: $TIER), do not edit.
+# from the facade's parameter manifest (tier: pro), do not edit.
 # The config poller re-renders this file when the manifest changes. The
 # facade sends parameters, never config or code (specs/17 §4).
 
-data_dir: $DATA_DIR
+data_dir: /var/lib/cloudviewer-agent
 
 sources:
   host_metrics:
     type: host_metrics
     collectors: [cpu, memory, disk, filesystem, load, network]
     scrape_interval_secs: 30
-EOF
-
-if [ "$SHIPS_JOURNALD" = "true" ]; then
-    cat <<'EOF'
 
   journald_warnings:
     type: journald
     include_matches:
       PRIORITY: ["0", "1", "2", "3", "4"]
-EOF
-fi
-
-if [ "$SHIPS_AUTH_LOGS" = "true" ]; then
-    cat <<'EOF'
-
-  auth_logs:
-    type: file
-    include:
-      - /var/log/auth.log
-      - /var/log/secure
-EOF
-fi
-
-if [ "$DISK_HEALTH" = "true" ]; then
-    # The command and interval are literals of this template (specs/44
-    # §3.2): tests/run.sh pins the rendered command byte-for-byte against
-    # this line. bytes framing makes one helper run one event, so the VRL
-    # sees each mdstat array's lines together.
-    cat <<'EOF'
 
   disk_health:
     type: exec
@@ -191,15 +27,8 @@ if [ "$DISK_HEALTH" = "true" ]; then
       codec: bytes
     framing:
       method: bytes
-EOF
-fi
 
-if [ "$SHIPS_JOURNALD" = "true" ] || [ "$DISK_HEALTH" = "true" ]; then
-    printf '\ntransforms:\n'
-fi
-
-if [ "$SHIPS_JOURNALD" = "true" ]; then
-    cat <<'EOF'
+transforms:
   redact_journald:
     type: remap
     inputs: [journald_warnings]
@@ -214,39 +43,7 @@ if [ "$SHIPS_JOURNALD" = "true" ]; then
       .message = replace(.message, r'(?i)token[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "token=[REDACTED]")
       .message = replace(.message, r'(?i)key[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "key=[REDACTED]")
       .message = replace(.message, r'(?s)-----BEGIN[ A-Z]*PRIVATE KEY-----.*?(-----END[ A-Z]*PRIVATE KEY-----|\z)', "[REDACTED PEM]")
-EOF
-fi
 
-if [ "$SHIPS_AUTH_LOGS" = "true" ]; then
-    cat <<'EOF'
-
-  redact_auth:
-    type: remap
-    inputs: [auth_logs]
-    source: |
-      .cv_source = "auth_logs"
-      .message = to_string(.message) ?? ""
-      .message = replace(.message, r'(?i)authorization["\x27]?[ \t]*[:=][ \t]*["\x27]?(basic[ \t]+|bearer[ \t]+)?[^\s"\x27]+', "authorization: [REDACTED]")
-      .message = replace(.message, r'(?i)bearer[ \t]+[A-Za-z0-9._~+/-]+=*', "bearer [REDACTED]")
-      .message = replace(.message, r'(?i)password[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "password=[REDACTED]")
-      .message = replace(.message, r'(?i)passwd[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "passwd=[REDACTED]")
-      .message = replace(.message, r'(?i)secret[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "secret=[REDACTED]")
-      .message = replace(.message, r'(?i)token[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "token=[REDACTED]")
-      .message = replace(.message, r'(?i)key[ \t]*[:=][ \t]*[^\s,;&"\x27]+', "key=[REDACTED]")
-      .message = replace(.message, r'(?s)-----BEGIN[ A-Z]*PRIVATE KEY-----.*?(-----END[ A-Z]*PRIVATE KEY-----|\z)', "[REDACTED PEM]")
-EOF
-fi
-
-if [ "$DISK_HEALTH" = "true" ]; then
-    # Disk health (specs/44 §4), all in sandboxed VRL running as the vector
-    # user: the helper's output is untrusted text. Only whole-disk device
-    # names (nvme<N>, sd<x>) and md<N> arrays become labels; model and
-    # serial are cut to 40 characters of [A-Za-z0-9 ._-]. One run in, one
-    # event with a metrics array out (pinned by tests/vector.sh against the
-    # golden fixtures); disk_health_split fans it out to one event per
-    # gauge. Patterns use \z, never a dollar sign (Vector env interpolation).
-    [ "$SHIPS_JOURNALD" = "true" ] && echo
-    cat <<'EOF'
   disk_health_parse:
     type: remap
     inputs: [disk_health]
@@ -412,18 +209,12 @@ if [ "$DISK_HEALTH" = "true" ]; then
     inputs: [disk_health_split]
     all_metrics: true
     metrics: []
-EOF
-fi
-
-metric_inputs="[host_metrics]"
-[ "$DISK_HEALTH" = "true" ] && metric_inputs="[host_metrics, disk_health_metrics]"
-cat <<EOF
 
 sinks:
   cloudviewer_metrics:
     type: http
-    inputs: $metric_inputs
-    uri: $BASE/v1/ingest/metrics
+    inputs: [host_metrics, disk_health_metrics]
+    uri: https://api.example.test/v1/ingest/metrics
     method: post
     encoding:
       codec: text
@@ -431,18 +222,12 @@ sinks:
       method: newline_delimited
     request:
       headers:
-        X-Agent-Token: $TOKEN
-EOF
-
-if [ "$SHIPS_JOURNALD" = "true" ]; then
-    inputs="[redact_journald]"
-    [ "$SHIPS_AUTH_LOGS" = "true" ] && inputs="[redact_journald, redact_auth]"
-    cat <<EOF
+        X-Agent-Token: golden-token
 
   cloudviewer_logs:
     type: http
-    inputs: $inputs
-    uri: $BASE/v1/ingest/logs
+    inputs: [redact_journald]
+    uri: https://api.example.test/v1/ingest/logs
     method: post
     encoding:
       codec: json
@@ -450,6 +235,4 @@ if [ "$SHIPS_JOURNALD" = "true" ]; then
       method: newline_delimited
     request:
       headers:
-        X-Agent-Token: $TOKEN
-EOF
-fi
+        X-Agent-Token: golden-token

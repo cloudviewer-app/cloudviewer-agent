@@ -57,7 +57,7 @@ jobs:
       - name: disk-health unit exposure never gets worse
         # Same gate as release.yml (specs/44 §9): the root collector's unit
         # may not drift above its recorded `systemd-analyze security` score.
-        run: systemd-analyze security --offline=yes --threshold=33 agent/systemd/cloudviewer-disk-health.service
+        run: systemd-analyze security --offline=yes --threshold=13 agent/systemd/cloudviewer-disk-health.service
 
   test:
     runs-on: ubuntu-latest

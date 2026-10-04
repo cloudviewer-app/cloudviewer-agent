@@ -3,9 +3,11 @@
 # for the unprivileged Vector to read. Root, because SMART needs
 # CAP_SYS_ADMIN (NVMe admin passthrough) and CAP_SYS_RAWIO (SATA/SAS) —
 # and nothing beyond those two: the bounding set below drops every other
-# capability, there is no network at all, the whole filesystem is
-# read-only except the one output directory, and only disk devices are
-# reachable, read-only.
+# capability, there is no network and no socket at all, the whole
+# filesystem is read-only except the one output directory, only disk
+# devices are reachable, read-only, and system calls are limited to
+# @system-service minus @privileged and @resources (ioctl, which SMART
+# uses, stays allowed).
 #
 # Shipped DISABLED, and nothing in this package enables it: the operator
 # switches it on locally (`cloudviewer-agent enable disk-health`, or the
@@ -26,7 +28,7 @@ CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO
 AmbientCapabilities=
 NoNewPrivileges=yes
 PrivateNetwork=yes
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=none
 IPAddressDeny=any
 ProtectSystem=strict
 ReadWritePaths=/run/cloudviewer-agent
@@ -34,6 +36,8 @@ ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
@@ -43,6 +47,10 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
 DevicePolicy=closed
 DeviceAllow=block-blkext r
 DeviceAllow=block-sd r

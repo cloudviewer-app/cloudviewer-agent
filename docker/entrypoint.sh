@@ -148,7 +148,7 @@ while [ -z "$stopping" ] && kill -0 "$vector_pid" 2>/dev/null; do
     fi
 done
 # Don't leave a stray sleep holding the container open.
-[ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null || true
+if [ -n "$sleep_pid" ]; then kill "$sleep_pid" 2>/dev/null || true; fi
 
 # Reap Vector and adopt its exit code. A `wait` interrupted by our own trap
 # returns 128+signal without reaping — loop until the status is Vector's.

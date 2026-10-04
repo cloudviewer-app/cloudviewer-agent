@@ -40,6 +40,11 @@ overrides:
   rpm:
     depends:
       - vector >= 0.57.0
+# smartctl for the disk-health collector (specs/44 §3.1) — a Recommends,
+# not a Depends: disk health is opt-in on the host, and without smartctl
+# the collector just reports "smartctl missing". (rpm: a weak dependency.)
+recommends:
+  - smartmontools
 
 contents:
   - src: agent/bin/cloudviewer-agent
@@ -62,6 +67,16 @@ contents:
     dst: /usr/libexec/cloudviewer-agent/fleet-enroll
     file_info:
       mode: 0755
+  # Disk health (specs/44): the root collector its sandboxed unit runs, and
+  # the unprivileged reader Vector's exec source runs at this fixed path.
+  - src: agent/libexec/disk-health-collect
+    dst: /usr/libexec/cloudviewer-agent/disk-health-collect
+    file_info:
+      mode: 0755
+  - src: agent/libexec/disk-health-read
+    dst: /usr/libexec/cloudviewer-agent/disk-health-read
+    file_info:
+      mode: 0755
   - src: agent/systemd/cloudviewer-agent.service
     dst: /usr/lib/systemd/system/cloudviewer-agent.service
     file_info:
@@ -72,6 +87,20 @@ contents:
       mode: 0644
   - src: agent/systemd/cloudviewer-agent-config.timer
     dst: /usr/lib/systemd/system/cloudviewer-agent-config.timer
+    file_info:
+      mode: 0644
+  # Shipped disabled; only `cloudviewer-agent enable disk-health` enables
+  # the timer (nfpm never enables units, and postinstall does not either).
+  - src: agent/systemd/cloudviewer-disk-health.service
+    dst: /usr/lib/systemd/system/cloudviewer-disk-health.service
+    file_info:
+      mode: 0644
+  - src: agent/systemd/cloudviewer-disk-health.timer
+    dst: /usr/lib/systemd/system/cloudviewer-disk-health.timer
+    file_info:
+      mode: 0644
+  - src: agent/tmpfiles/cloudviewer-agent.conf
+    dst: /usr/lib/tmpfiles.d/cloudviewer-agent.conf
     file_info:
       mode: 0644
   - src: README.md

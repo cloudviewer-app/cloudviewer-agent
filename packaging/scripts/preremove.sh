@@ -13,5 +13,6 @@ upgrade | 1)
     ;;
 *)
     systemctl disable --now cloudviewer-agent.service cloudviewer-agent-config.timer >/dev/null 2>&1 || true
+    systemctl disable --now cloudviewer-disk-health.timer >/dev/null 2>&1 || true
     ;;
 esac

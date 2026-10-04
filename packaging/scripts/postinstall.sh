@@ -38,6 +38,10 @@ fi
 chmod 2750 /etc/cloudviewer-agent
 
 systemctl daemon-reload >/dev/null 2>&1 || true
+# /run/cloudviewer-agent (tmpfiles.d) now rather than at the next boot, so
+# `cloudviewer-agent enable disk-health` works right away. Creating a
+# directory enables nothing: the disk-health units stay disabled.
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/cloudviewer-agent.conf >/dev/null 2>&1 || true
 
 if [ -f /etc/cloudviewer-agent/manifest ]; then
     # Upgrade of an enrolled host: re-render vector.yaml from the CACHED

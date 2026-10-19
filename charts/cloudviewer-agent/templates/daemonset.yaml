@@ -93,6 +93,20 @@ spec:
             - name: root
               mountPath: /host/root
               readOnly: true
+            # The node's journal (Pro/Team ship warnings and above): the
+            # journald source runs journalctl, which reads the journal of the
+            # machine named in /etc/machine-id from these default paths — so
+            # all three are the node's, at the paths journalctl expects.
+            # /var/log also carries /var/log/auth.log for Team's auth logs.
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: runjournal
+              mountPath: /run/log/journal
+              readOnly: true
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
       volumes:
         # Whole-Secret mount (no items:) on purpose: an items list naming
         # a key the Secret lacks fails the mount, and with existingSecret
@@ -110,3 +124,14 @@ spec:
         - name: root
           hostPath:
             path: /
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: runjournal
+          hostPath:
+            path: /run/log/journal
+            type: DirectoryOrCreate
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File

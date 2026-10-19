@@ -12,15 +12,22 @@
 # current train. ARG must precede FROM to be usable in it.
 ARG VECTOR_VERSION=0.57.0
 
-# Alpine, not distroless: the entrypoint and poller are POSIX sh. Verified
-# from upstream's distribution/docker/alpine/Dockerfile: the image carries
-# ca-certificates + tzdata, the binary at /usr/local/bin/vector, and NO curl.
-FROM timberio/vector:${VECTOR_VERSION}-alpine
+# Debian, not Alpine: Pro and Team configs carry a journald source, and
+# Vector's journald source runs journalctl, which only the debian variant
+# ships (systemd 257 in 0.57.0-debian; the alpine variant has none, so a
+# Pro team's DaemonSet crashed on every start with "journalctl failed to
+# execute" — found in the ownpaas fleet drill, 2026-10-19). The chart mounts
+# the node's journal read-only. Not distroless: the entrypoint and poller
+# are POSIX sh. The image carries ca-certificates, the binary at
+# /usr/bin/vector, and NO curl.
+FROM timberio/vector:${VECTOR_VERSION}-debian
 
 # curl, because the poller uses it: keeping the container poller byte-
 # identical to the host version beats porting it to busybox wget's
 # divergent flag set (spec 30 §6).
-RUN apk add --no-cache curl
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # The poller and the manifest renderer live at the same FHS paths the OS
 # package installs them to (spec 30 §3) — the same scripts, identical

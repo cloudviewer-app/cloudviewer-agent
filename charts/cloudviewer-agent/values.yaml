@@ -1,4 +1,4 @@
-# Cloud Viewer agent chart values.
+# Vaicoa agent chart values.
 #
 # Deliberately small (specs/30 §7): the DaemonSet's shape — hostNetwork,
 # read-only host mounts, token via Secret — is fixed, not configurable.
@@ -42,7 +42,7 @@ token: ""
 enrollToken: ""
 
 # Facade base URL the agent fetches its config from and ships telemetry to.
-facadeUrl: https://api.cloudviewer.app
+facadeUrl: https://api.app.vaicoa.com
 
 # Small by design: the agent is one Vector instance doing host metrics.
 # Memory limit only — a CPU limit would throttle collection spikes for no

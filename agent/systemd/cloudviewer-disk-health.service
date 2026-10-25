@@ -18,7 +18,7 @@
 # `systemd-analyze security` exposure score is recorded there and gated in
 # the release workflow so it can only get better.
 [Unit]
-Description=Cloud Viewer disk-health collector (SMART, read-only)
+Description=Vaicoa disk-health collector (SMART, read-only)
 Documentation=https://github.com/cloudviewer-app/cloudviewer-agent
 
 [Service]

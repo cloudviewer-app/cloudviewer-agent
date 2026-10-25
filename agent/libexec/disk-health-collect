@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Cloud Viewer disk-health collector — the ONLY root-side piece of disk
+# Vaicoa disk-health collector — the ONLY root-side piece of disk
 # health (specs/44 §3.1). Started by cloudviewer-disk-health.service
 # (sandboxed and offline), which its timer runs every 5 minutes. Both units
 # ship disabled; the operator switches them on locally with

@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
-# cloudviewer-agent — enrollment and lifecycle control for the Cloud Viewer
-# monitoring agent (https://cloudviewer.app).
+# cloudviewer-agent — enrollment and lifecycle control for the Vaicoa
+# monitoring agent (https://vaicoa.com/app/).
 #
 # The package installs the agent inert: units exist but are guarded by
 # ConditionPathExists on agent.env and are not enabled. This tool is the
@@ -47,7 +47,7 @@ ETC_DIR="${CV_AGENT_ETC_DIR:-$ETC_DIR_DEFAULT}"
 DATA_DIR="${CV_AGENT_DATA_DIR:-/var/lib/cloudviewer-agent}"
 SYSTEMCTL="${CV_AGENT_SYSTEMCTL:-systemctl}"
 LIBEXEC_DIR="${CV_AGENT_LIBEXEC_DIR:-/usr/libexec/cloudviewer-agent}"
-FACADE_DEFAULT="https://api.cloudviewer.app"
+FACADE_DEFAULT="https://api.app.vaicoa.com"
 
 UNITS="cloudviewer-agent.service cloudviewer-agent-config.timer"
 DISK_HEALTH_TIMER="cloudviewer-disk-health.timer"
@@ -69,7 +69,7 @@ usage:
   cloudviewer-agent help
 
 enroll options:
-  --token <t>         per-server agent token from the Cloud Viewer portal
+  --token <t>         per-server agent token from the Vaicoa portal
                       (shown once when the server is added). Without it,
                       enroll completes from an existing
                       /etc/cloudviewer-agent/agent.env.
@@ -80,7 +80,7 @@ enroll options:
                       (Robot) servers have no metadata service and use
                       --token. No-op once enrolled (safe on every
                       config-management converge).
-  --facade-url <u>    facade base URL (default https://api.cloudviewer.app)
+  --facade-url <u>    facade base URL (default https://api.app.vaicoa.com)
   --quiet             suppress the success banner (for package hooks)
 
 enable disk-health:
@@ -88,7 +88,7 @@ enable disk-health:
   access that runs `smartctl -i -H -A -n standby` (read-only, never a
   self-test, never wakes a sleeping disk) every 5 minutes. Needs smartctl
   (package smartmontools). Shipping its data additionally needs the
-  Cloud Viewer plan to include disk health; `disable disk-health` stops it.
+  Vaicoa plan to include disk health; `disable disk-health` stops it.
 EOF
 }
 
@@ -273,7 +273,7 @@ EOF
 
     if [ -z "$QUIET" ]; then
         log ""
-        log "Cloud Viewer agent enrolled."
+        log "Vaicoa agent enrolled."
         log "  config:   $ETC_DIR/vector.yaml (refreshed every minute from the portal)"
         log "  service:  systemctl status cloudviewer-agent"
         log ""
@@ -318,7 +318,7 @@ cmd_enable() {
         fail "smartctl not found — install smartmontools first (apt install smartmontools / dnf install smartmontools), then re-run"
     "$SYSTEMCTL" enable --now "$DISK_HEALTH_TIMER"
     log "Disk health enabled: SMART is read every 5 minutes (read-only, offline, sandboxed)."
-    log "It is shipped when your Cloud Viewer plan includes disk health; disable with:"
+    log "It is shipped when your Vaicoa plan includes disk health; disable with:"
     log "  cloudviewer-agent disable disk-health"
 }
 
@@ -371,7 +371,7 @@ cmd_uninstall() {
     "$SYSTEMCTL" disable --now $UNITS 2>/dev/null || true
     "$SYSTEMCTL" disable --now "$DISK_HEALTH_TIMER" 2>/dev/null || true
     rm -rf "$ETC_DIR" "$DATA_DIR"
-    log "Cloud Viewer agent unenrolled (config, token, and buffered data removed)."
+    log "Vaicoa agent unenrolled (config, token, and buffered data removed)."
     log "Remove the package with your package manager, e.g.:"
     log "  apt purge cloudviewer-agent   (or: dnf remove cloudviewer-agent)"
     if [ -n "$DEREGISTERED" ]; then

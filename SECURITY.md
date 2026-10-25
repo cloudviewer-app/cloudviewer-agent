@@ -10,8 +10,9 @@ code it did not opt into are the ones we care most about.
 Preferred: **GitHub private vulnerability reporting** on this repository
 (Security tab → "Report a vulnerability").
 
-Alternatively: **security@cloudviewer.app** — the same disclosure contact
-as the Cloud Viewer product's `security.txt` and the
+Alternatively: **security@mitjamartini.com** — the same disclosure contact
+as the Vaicoa product's
+[`security.txt`](https://vaicoa.com/.well-known/security.txt) and the
 [monorepo security policy](https://github.com/mitja/cloudviewer/blob/main/SECURITY.md).
 If you want to encrypt, ask for a key in a first, contentless mail.
 
@@ -33,9 +34,9 @@ updates through your host's normal update policy.
 
 ## Package signing
 
-Packages and the apt/yum repositories are signed with the "Cloud Viewer
+Packages and the apt/yum repositories are signed with the "Vaicoa
 Package Signing" GPG key. Its **fingerprint is published at
-[cloudviewer.app](https://cloudviewer.app) and in this repository's
+[vaicoa.com/app/security](https://vaicoa.com/app/security/) and in this repository's
 README** — cross-check both before trusting the repository. CI holds
 only a signing subkey; the master key is offline.
 

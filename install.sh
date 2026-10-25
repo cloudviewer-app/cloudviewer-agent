@@ -1,13 +1,13 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# Cloud Viewer agent bootstrap — served at https://get.cloudviewer.app/agent
+# Vaicoa agent bootstrap — served at https://get.app.vaicoa.com/agent
 #
-# Install:    curl -fsSL https://get.cloudviewer.app/agent | sh -s -- --token <agent_token>
-# Uninstall:  curl -fsSL https://get.cloudviewer.app/agent | sh -s -- --uninstall
+# Install:    curl -fsSL https://get.app.vaicoa.com/agent | sh -s -- --token <agent_token>
+# Uninstall:  curl -fsSL https://get.app.vaicoa.com/agent | sh -s -- --uninstall
 #
 # This script is a BOOTSTRAP, not the installer: it configures the two
-# signed package repositories (Cloud Viewer's and Vector's), installs the
+# signed package repositories (Vaicoa's and Vector's), installs the
 # cloudviewer-agent package with the system package manager, and runs
 # `cloudviewer-agent enroll`. After it finishes, nothing on the host is
 # script-managed — every installed file is listed by `dpkg -L
@@ -32,7 +32,7 @@ set -eu
 ROOT="${CV_AGENT_ROOT:-}"
 SYSTEMCTL="${CV_AGENT_SYSTEMCTL:-systemctl}"
 
-GET_BASE="https://get.cloudviewer.app"
+GET_BASE="https://get.app.vaicoa.com"
 FACADE_URL=""
 TOKEN=""
 ENROLL_TOKEN=""
@@ -48,7 +48,7 @@ OLD_DATA_DIR="$ROOT/var/lib/vector"
 
 usage() {
     cat <<'EOF'
-Cloud Viewer agent bootstrap
+Vaicoa agent bootstrap
 
 Usage:
   install:    sh install.sh --token <agent_token> [--facade-url <url>] [--with-disk-health]
@@ -56,7 +56,7 @@ Usage:
   uninstall:  sh install.sh --uninstall
 
 Options:
-  --token <t>         agent token from the Cloud Viewer portal (shown once at
+  --token <t>         agent token from the Vaicoa portal (shown once at
                       server creation). Optional when a pre-provisioned
                       /etc/cloudviewer-agent/agent.env exists (or on migration
                       from an older install — the stored token is reused).
@@ -65,7 +65,7 @@ Options:
                       Cloud metadata service — no per-server portal step.
                       Hetzner Cloud only; dedicated (Robot) servers use
                       --token.
-  --facade-url <u>    facade base URL (default https://api.cloudviewer.app)
+  --facade-url <u>    facade base URL (default https://api.app.vaicoa.com)
   --with-disk-health  also install smartmontools and switch on the local
                       disk-health collector (SMART, read-only, every 5 min;
                       the same as `cloudviewer-agent enable disk-health`)
@@ -157,9 +157,9 @@ setup_apt_repos() {
     sources_dir="$ROOT/etc/apt/sources.list.d"
     mkdir -p "$keyring_dir" "$sources_dir"
 
-    log "configuring the Cloud Viewer apt repository ..."
+    log "configuring the Vaicoa apt repository ..."
     curl -fsSL "$GET_BASE/keys/cloudviewer.gpg" -o "$keyring_dir/cloudviewer.gpg" ||
-        fail "could not download the Cloud Viewer signing key"
+        fail "could not download the Vaicoa signing key ($GET_BASE/keys/cloudviewer.gpg)"
     cat >"$sources_dir/cloudviewer.list" <<EOF
 deb [signed-by=/usr/share/keyrings/cloudviewer.gpg] $GET_BASE/apt stable main
 EOF
@@ -193,10 +193,10 @@ setup_rpm_repos() {
     repos_dir="$ROOT/etc/yum.repos.d"
     mkdir -p "$repos_dir"
 
-    log "configuring the Cloud Viewer rpm repository ..."
+    log "configuring the Vaicoa rpm repository ..."
     cat >"$repos_dir/cloudviewer.repo" <<EOF
 [cloudviewer]
-name=Cloud Viewer
+name=Vaicoa
 baseurl=$GET_BASE/rpm
 enabled=1
 gpgcheck=1
@@ -327,7 +327,7 @@ install_agent() {
     fi
 
     log ""
-    log "Cloud Viewer agent installed as a system package."
+    log "Vaicoa agent installed as a system package."
     log "  contents: dpkg -L cloudviewer-agent   (or: rpm -ql cloudviewer-agent)"
     log "  service:  systemctl status cloudviewer-agent"
     log "  updates:  arrive through your package manager from the signed repo"
@@ -374,7 +374,7 @@ uninstall_agent() {
     "$SYSTEMCTL" daemon-reload 2>/dev/null || true
     rm -rf "$ETC_DIR" "$OLD_OPT" "$OLD_DATA_DIR" "$NEW_DATA_DIR"
     rm -f "$ROOT/usr/local/bin/cloudviewer-report"
-    log "Cloud Viewer agent removed (binary, config, token, units, and buffered data)."
+    log "Vaicoa agent removed (binary, config, token, units, and buffered data)."
     if [ -n "$DEREGISTERED" ]; then
         log "The server was deregistered: its portal entry shows as retired and disappears after 72 hours."
     else

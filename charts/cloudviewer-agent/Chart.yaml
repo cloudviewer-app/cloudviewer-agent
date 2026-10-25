@@ -1,6 +1,6 @@
 apiVersion: v2
 name: cloudviewer-agent
-description: Cloud Viewer monitoring agent as a DaemonSet — each node self-registers via fleet enrollment
+description: Vaicoa monitoring agent as a DaemonSet — each node self-registers via fleet enrollment
 type: application
 # Chart version, independent of the agent release train. 0.2.0 made fleet
 # enrollment functional (enrollToken / Secret key "enroll-token"), which
@@ -9,7 +9,7 @@ type: application
 version: 0.2.0
 # The agent/image version this chart deploys by default (<year>.<quarter>.<patch>).
 appVersion: "2026.3.0"
-home: https://cloudviewer.app
+home: https://vaicoa.com/app/
 sources:
   - https://github.com/cloudviewer-app/cloudviewer-agent
 keywords:

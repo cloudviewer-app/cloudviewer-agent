@@ -1,6 +1,6 @@
 # cloudviewer-agent
 
-The monitoring agent for [Cloud Viewer](https://cloudviewer.app), packaged
+The monitoring agent for [Vaicoa](https://vaicoa.com/app/) (formerly Cloud Viewer), packaged
 for easy, verifiable installs. The collector is upstream
 [Vector](https://vector.dev) — this project deliberately ships **no
 binaries of its own**, only the small, readable pieces around it:
@@ -48,26 +48,26 @@ Vector instance of your own can run alongside untouched).
 Quick start (configures both signed repos, installs the package, enrolls):
 
 ```sh
-curl -fsSL https://get.cloudviewer.app/agent | sh -s -- --token <agent_token>
+curl -fsSL https://get.app.vaicoa.com/agent | sh -s -- --token <agent_token>
 ```
 
 Or the same thing by hand on Debian/Ubuntu:
 
 ```sh
-curl -fsSL https://get.cloudviewer.app/keys/cloudviewer.gpg \
+curl -fsSL https://get.app.vaicoa.com/keys/cloudviewer.gpg \
   -o /usr/share/keyrings/cloudviewer.gpg
-echo "deb [signed-by=/usr/share/keyrings/cloudviewer.gpg] https://get.cloudviewer.app/apt stable main" \
+echo "deb [signed-by=/usr/share/keyrings/cloudviewer.gpg] https://get.app.vaicoa.com/apt stable main" \
   > /etc/apt/sources.list.d/cloudviewer.list
 # + Vector's repo per https://vector.dev/docs/setup/installation/package-managers/apt/
 apt update && apt install cloudviewer-agent
 cloudviewer-agent enroll --token <agent_token>
 ```
 
-RHEL-family: the matching `.repo` files against `https://get.cloudviewer.app/rpm`
+RHEL-family: the matching `.repo` files against `https://get.app.vaicoa.com/rpm`
 and `yum.vector.dev`, then `dnf install cloudviewer-agent`.
 
 The package installs **inert** — nothing starts until `enroll` writes the
-identity. The token is shown once in the Cloud Viewer portal when the
+identity. The token is shown once in the Vaicoa portal when the
 server is added.
 
 ### Fleet enrollment (Hetzner Cloud)
@@ -236,7 +236,7 @@ after 72 h) and removes config, token, and buffered data. Plain
   read the token). Only the operator-run commands (`enroll`, `render`,
   `uninstall`) touch the system as root.
 - Packages come from a GPG-signed repo; the signing key fingerprint is
-  published at cloudviewer.app and here: `TODO: fingerprint after key
+  published at https://vaicoa.com/app/security/ and here: `TODO: fingerprint after key
   ceremony`. Releases carry SBOMs and build provenance attestations; the
   repository's own hardening is documented in
   [docs/github-config.md](docs/github-config.md).
@@ -249,7 +249,10 @@ bash tests/run.sh        # full harness: stub facade, no root/systemd needed
 bash tests/vector.sh     # real Vector (docker): validate, VRL unit tests, disk-health e2e
 shellcheck agent/bin/* agent/libexec/* packaging/scripts/*.sh install.sh
 VERSION=0.0.0+dev nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+scripts/release-dry-run.sh  # release.yml's package/sign/repo steps in Docker, throwaway key
 ```
+
+Releasing: [RELEASING.md](RELEASING.md).
 
 Everything an installed host runs lives under `agent/` — seven small POSIX
 sh files, five units and one tmpfiles.d entry. CI (shellcheck, `dash -n`,
@@ -258,5 +261,5 @@ security` gate, package dry-builds, chart lint) runs on every PR.
 
 ## License
 
-Apache-2.0. "Cloud Viewer" (the name and logo) is not covered by the
-code license.
+Apache-2.0. "Vaicoa" and "Cloud Viewer" (the names and logos) are not
+covered by the code license.

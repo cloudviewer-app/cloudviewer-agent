@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Cloud Viewer disk-health reader (specs/44 §3.2) — run by Vector's exec
+# Vaicoa disk-health reader (specs/44 §3.2) — run by Vector's exec
 # source as the unprivileged vector user, at the fixed path the installed
 # config template names. It prints the root collector's last run and the
 # kernel's software-RAID status, each line prefixed with its kind:

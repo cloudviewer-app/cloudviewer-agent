@@ -1,12 +1,12 @@
 # cloudviewer-agent Helm chart
 
-Runs the [Cloud Viewer](https://cloudviewer.app) monitoring agent as a
+Runs the [Vaicoa](https://vaicoa.com/app/) monitoring agent as a
 DaemonSet: one pod per node, `hostNetwork`, read-only mounts of the host's
-`/proc`, `/sys`, and `/`, shipping node metrics to the Cloud Viewer facade.
+`/proc`, `/sys`, and `/`, shipping node metrics to the Vaicoa facade.
 
 The chart is deliberately minimal — a fixed DaemonSet shape with ~5 knobs,
 readable in one sitting. It does not expose Vector's configuration: the
-agent's Vector config is rendered by the Cloud Viewer portal and fetched by
+agent's Vector config is rendered by the Vaicoa portal and fetched by
 the agent itself. If you want a general-purpose Vector deployment, use
 [Vector's own chart](https://github.com/vectordotdev/helm-charts) instead.
 
@@ -68,7 +68,7 @@ For a single-node cluster with a per-server token, use
 | `existingSecret` | `""` | Name of a Secret with key `enroll-token` (fleet) and/or `token` (per-server). **The documented path.** |
 | `token` | `""` | Quick start only: per-server token; chart creates the Secret. Single-node clusters only. |
 | `enrollToken` | `""` | Quick start only: fleet enrollment token; chart creates the Secret. |
-| `facadeUrl` | `https://api.cloudviewer.app` | Facade base URL. |
+| `facadeUrl` | `https://api.app.vaicoa.com` | Facade base URL. |
 | `resources` | small requests, 256Mi limit | Pod resources. |
 | `tolerations` | `[]` | E.g. tolerate control-plane taints to cover masters. |
 | `nodeSelector` | `{}` | Restrict which nodes run the agent. |

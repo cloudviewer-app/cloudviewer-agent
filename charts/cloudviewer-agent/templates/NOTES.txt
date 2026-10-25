@@ -1,4 +1,4 @@
-Cloud Viewer agent installed as DaemonSet {{ include "cloudviewer-agent.fullname" . }}.
+Vaicoa agent installed as DaemonSet {{ include "cloudviewer-agent.fullname" . }}.
 
 Check the rollout:
 

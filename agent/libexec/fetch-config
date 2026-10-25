@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Cloud Viewer agent config poller.
+# Vaicoa agent config poller.
 #
 # Run every minute by cloudviewer-agent-config.timer — as the dedicated
 # unprivileged `cloudviewer-agent` user, never root (see the .service for

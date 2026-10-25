@@ -3,7 +3,7 @@
 # --with-disk-health) on the host itself enables it — never the package,
 # never the config poller.
 [Unit]
-Description=Collect disk health (SMART) for the Cloud Viewer agent
+Description=Collect disk health (SMART) for the Vaicoa agent
 
 [Timer]
 OnBootSec=2min

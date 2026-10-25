@@ -1,9 +1,10 @@
 # Release pipeline (specs 30 §9): tag push → verify (the same lint+test
 # gate as CI) → nfpm deb/rpm build → GPG sign → static apt/yum repo trees
-# → GitHub Release (packages + SHA256SUMS + SBOMs + provenance
-# attestation) → multi-arch image push → Helm OCI push → dispatch the
-# private monorepo's `get` image rebuild, which is how the signed repo
-# trees and bootstrap land on get.cloudviewer.app.
+# → GitHub Release (packages + repo-dist.tar.gz + SHA256SUMS + SBOMs + provenance
+# attestation) → multi-arch image push → Helm OCI push → (optional,
+# off) dispatch to the monorepo. The signed trees and the bootstrap reach
+# get.app.vaicoa.com through the monorepo's reviewed
+# `gmake -C deploy sync-installer AGENT_REF=<tag>` commit — RELEASING.md.
 #
 # Security shape (docs/github-config.md §3/§4):
 #   * Triggers on tag push only. The `20*` tag ruleset restricts tag
@@ -35,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: shellcheck + POSIX parse
@@ -82,19 +83,20 @@ jobs:
       # Tag == version, no v prefix (spec 30 D9): 2026.3.0.
       VERSION: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v5 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: stable
       - name: install nfpm + repo tooling
         # rpm supplies rpmsign; createrepo-c builds the yum metadata;
         # apt-utils supplies apt-ftparchive for the apt indices.
-        # TODO(pin): pin an nfpm version (…/nfpm@vX.Y.Z, not @latest) before first release (docs/github-config.md §3)
+        # nfpm pinned (docs/github-config.md §3); keep ci.yml, release.yml and
+        # scripts/release-dry-run.sh on the same version.
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends rpm createrepo-c apt-utils
 
@@ -127,12 +129,16 @@ jobs:
           echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
 
       - name: sign the rpm (embedded signature)
+        # %__gpg: rpm 4.18 on ubuntu-24.04 defaults it to /usr/bin/gpg2,
+        # which the gnupg package does not ship ("Could not exec gpg";
+        # found by scripts/release-dry-run.sh). Point it at gpg.
         # rpm carries its signature inside the package; deb integrity is
         # covered by the signed apt indices below plus the detached .asc.
         run: |
           set -eu
           cat > "$HOME/.rpmmacros" <<EOF
           %_signature gpg
+          %__gpg $(command -v gpg)
           %_gpg_name ${GPG_KEY_ID}
           %__gpg_sign_cmd %{__gpg} gpg --batch --pinentry-mode loopback --passphrase-file ${HOME}/.gnupg/passphrase --no-armor --digest-algo sha256 -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           EOF
@@ -156,7 +162,7 @@ jobs:
         # Layout per spec 30 §4: pool + dists/stable/main, Release
         # clearsigned as InRelease plus detached Release.gpg. The tree is
         # baked into the monorepo's `get` image and served verbatim at
-        # get.cloudviewer.app/apt.
+        # get.app.vaicoa.com/apt.
         run: |
           set -eu
           mkdir -p repo-dist/apt/pool/main \
@@ -171,8 +177,8 @@ jobs:
           gzip -9 -k dists/stable/main/binary-amd64/Packages
           gzip -9 -k dists/stable/main/binary-arm64/Packages
           apt-ftparchive \
-            -o APT::FTPArchive::Release::Origin="Cloud Viewer" \
-            -o APT::FTPArchive::Release::Label="Cloud Viewer" \
+            -o APT::FTPArchive::Release::Origin="Vaicoa" \
+            -o APT::FTPArchive::Release::Label="Vaicoa" \
             -o APT::FTPArchive::Release::Suite=stable \
             -o APT::FTPArchive::Release::Codename=stable \
             -o APT::FTPArchive::Release::Components=main \
@@ -186,7 +192,7 @@ jobs:
             --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
 
       - name: assemble static yum repo tree
-        # Served at get.cloudviewer.app/rpm. The rpms are individually
+        # Served at get.app.vaicoa.com/rpm. The rpms are individually
         # signed above; dnf additionally checks the detached signature on
         # repomd.xml (repo_gpgcheck), which --detach-sign drops next to it
         # as repomd.xml.asc.
@@ -199,11 +205,29 @@ jobs:
             --passphrase-file "$HOME/.gnupg/passphrase" -u "$GPG_KEY_ID" \
             --armor --detach-sign repo-dist/rpm/repodata/repomd.xml
           # Public key, both binary (apt signed-by keyring) and armored —
-          # served at get.cloudviewer.app/keys/. The fingerprint is
+          # served at get.app.vaicoa.com/keys/. The fingerprint is
           # cross-published (docs site, portal, README) so a swapped key
           # is visible in several places at once.
           gpg --export "$GPG_KEY_ID" > repo-dist/keys/cloudviewer.gpg
           gpg --export --armor "$GPG_KEY_ID" > repo-dist/keys/cloudviewer.asc
+
+      - name: repo-dist.tar.gz (the signed trees, as a release asset)
+        # What get.app.vaicoa.com serves: the monorepo's
+        # `gmake -C deploy sync-installer AGENT_REF=<tag>` downloads this
+        # asset from the Release, checks it against SHA256SUMS and requires
+        # keys/cloudviewer.gpg at the top level, then vendors it into the get
+        # ConfigMap (600 KiB budget). Without it the sync pins an EMPTY tree
+        # and /apt /rpm /keys answer 404. Deterministic: sorted, fixed owner
+        # and mtime, so the same trees give the same bytes.
+        run: |
+          set -eu
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$(git log -1 --format=%ct)" -C repo-dist -cf - apt rpm keys |
+            gzip -9n > dist/repo-dist.tar.gz
+          tar -tzf dist/repo-dist.tar.gz | grep -qx 'keys/cloudviewer.gpg'
+          size=$(wc -c < dist/repo-dist.tar.gz)
+          echo "repo-dist.tar.gz: $size bytes"
+          test "$size" -le $((600 * 1024))
 
       # SBOM per release artifact: CRA posture, same rationale as the
       # monorepo's sbom.yml — release artefacts keep CRA-lifetime
@@ -214,14 +238,14 @@ jobs:
           set -eu
           cp dist/*.deb cloudviewer-agent.deb
           cp dist/*.rpm cloudviewer-agent.rpm
-      - uses: anchore/sbom-action@v0 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           file: cloudviewer-agent.deb
           format: cyclonedx-json
           output-file: dist/cloudviewer-agent-deb.cdx.json
           upload-artifact: false
           upload-release-assets: false
-      - uses: anchore/sbom-action@v0 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           file: cloudviewer-agent.rpm
           format: cyclonedx-json
@@ -247,13 +271,13 @@ jobs:
           gh release create "$VERSION" dist/* \
             --verify-tag \
             --title "cloudviewer-agent $VERSION" \
-            --notes "Signed deb/rpm, SHA256SUMS, and CycloneDX SBOMs for release $VERSION.
+            --notes "Signed deb/rpm, the signed apt/yum trees (repo-dist.tar.gz), SHA256SUMS, and CycloneDX SBOMs for release $VERSION.
 
-          Install via the signed package repository (recommended): https://get.cloudviewer.app — see the README.
-          Verify assets against SHA256SUMS and the detached .asc signatures; the signing-key fingerprint is published at https://cloudviewer.app and in the README.
+          Install via the signed package repository (recommended): https://get.app.vaicoa.com — see the README.
+          Verify assets against SHA256SUMS and the detached .asc signatures; the signing-key fingerprint is published at https://vaicoa.com/app/security/ and in the README.
           Build provenance for the packages is attested via GitHub artifact attestations for this run."
 
-      - uses: actions/attest-build-provenance@v2 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         # Independent, non-forgeable record tying the packages to this
         # public run and tag (spec 30 §10) — attacker-visible even if the
         # signing key ever leaks.
@@ -262,7 +286,7 @@ jobs:
             dist/*.deb
             dist/*.rpm
 
-      - uses: actions/upload-artifact@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         # Handoff for the monorepo's `get` image rebuild (notify-get
         # below): the dispatched workflow downloads this run's repo trees
         # and bakes them into the nginx image.
@@ -280,17 +304,17 @@ jobs:
       contents: read
       packages: write # push to ghcr.io
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@v3 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
-      - uses: docker/setup-buildx-action@v3 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
-      - uses: docker/login-action@v3 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         # Multi-arch is cheap here: the image is upstream Vector's alpine
         # image plus a layer of POSIX scripts (spec 30 D7). <version> is
         # immutable, `latest` moves; the Helm chart pins by digest.
@@ -315,7 +339,7 @@ jobs:
       contents: read
       packages: write # push to ghcr.io (OCI charts)
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: package and push chart
@@ -334,9 +358,10 @@ jobs:
           helm push chart-dist/cloudviewer-agent-*.tgz oci://ghcr.io/cloudviewer-app/charts
 
   notify-get:
-    # Tells the private monorepo to rebuild the `get` nginx image with
-    # this release's signed repo trees (the repo-dist artifact above);
-    # they reach get.cloudviewer.app when Flux rolls that image.
+    # Sends an `agent-release` event to the monorepo. The monorepo has no
+    # receiver for it (docs/agent-operations.md §1 item 8 there): publishing
+    # on get.app.vaicoa.com is the reviewed sync-installer commit
+    # (RELEASING.md). A receiver would only automate opening that PR.
     #
     # Gated on the repository variable MONOREPO_DISPATCH == 'true' — the
     # same quiet-until-configured pattern as the monorepo's FORGEJO_SYNC

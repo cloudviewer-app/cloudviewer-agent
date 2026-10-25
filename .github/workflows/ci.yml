@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: shellcheck + POSIX parse
@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: harness (stub facade on loopback)
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: vector validate + VRL unit tests + disk-health e2e
@@ -89,18 +89,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: stable
       - name: install nfpm
         # nfpm: one YAML → deb + rpm (spec 30 D4). Built from source with
         # `go install` — the module proxy checksum-verifies it — instead of
         # downloading a release binary this workflow couldn't pin.
-        # TODO(pin): pin an nfpm version (…/nfpm@vX.Y.Z, not @latest) before first release (docs/github-config.md §3)
-        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+        # nfpm pinned (docs/github-config.md §3); keep ci.yml, release.yml and
+        # scripts/release-dry-run.sh on the same version.
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
       - name: dry-build deb + rpm
         env:
           VERSION: 0.0.0+ci # obviously-not-a-release version; the tag drives real builds
@@ -117,7 +118,7 @@ jobs:
         run: |
           dpkg-deb --info dist/*.deb
           dpkg-deb --contents dist/*.deb
-      - uses: actions/upload-artifact@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: packages
           path: dist/
@@ -128,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: helm lint + template
@@ -143,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4 # TODO(pin): replace tag with commit SHA before first release (docs/github-config.md §3)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: docker build (no push)

@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Cloud Viewer fleet enrollment (specs/12 §3) — the ONE implementation,
+# Vaicoa fleet enrollment (specs/12 §3) — the ONE implementation,
 # shared by the ctl (`cloudviewer-agent enroll --enroll-token`) and the
 # container entrypoint: read this server's numeric Hetzner id from the
 # link-local metadata service, self-register with the facade, and print

@@ -11,7 +11,7 @@
 # never write them (privilege separation both ways). The poller is a
 # conditional GET — see agent/libexec/fetch-config for the full contract.
 [Unit]
-Description=Cloud Viewer agent config refresh
+Description=Vaicoa agent config refresh
 After=network-online.target
 ConditionPathExists=/etc/cloudviewer-agent/agent.env
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# Cloud Viewer agent container entrypoint (specs/30-agent-packaging §6).
+# Vaicoa agent container entrypoint (specs/30-agent-packaging §6).
 #
 # The container is the install: resolve the token, write agent.env, fetch
 # the initial vector.yaml from the facade, then supervise exactly one
@@ -17,7 +17,7 @@
 #                               metadata service (needs hostNetwork) and
 #                               uses the minted per-server token instead
 #   CV_AGENT_ENROLL_TOKEN_FILE  file holding the fleet token (Secret mounts)
-#   CV_AGENT_FACADE_URL         facade base URL (default https://api.cloudviewer.app)
+#   CV_AGENT_FACADE_URL         facade base URL (default https://api.app.vaicoa.com)
 #
 # Precedence: a per-server credential always wins over a fleet credential
 # (an explicit server identity beats self-registration), and within each
@@ -43,7 +43,7 @@ fail() {
     exit 1
 }
 
-FACADE_URL="${CV_AGENT_FACADE_URL:-https://api.cloudviewer.app}"
+FACADE_URL="${CV_AGENT_FACADE_URL:-https://api.app.vaicoa.com}"
 FACADE_URL="${FACADE_URL%/}"
 
 # --- Resolve the token ------------------------------------------------------

@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Cloud Viewer job reporter.
+# Vaicoa job reporter.
 #
 # Wraps a command — usually a cron job — measures its duration, reports its
 # exit code to the facade, and PROPAGATES that exit code so the cron line
@@ -79,7 +79,7 @@ duration=$(($(date +%s) - start))
 # non-interactive POSIX shell, and agent.env is 0600 root — a non-root
 # cron user must degrade to "job ran, not reported", never to "job killed".
 TOKEN="${CV_AGENT_TOKEN:-}"
-FACADE="${CV_AGENT_FACADE_URL:-https://api.cloudviewer.app}"
+FACADE="${CV_AGENT_FACADE_URL:-https://api.app.vaicoa.com}"
 if [ -n "$TOKEN_FILE" ]; then
     TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
 elif [ -z "$TOKEN" ] && [ -r "$ETC_DIR/agent.env" ]; then

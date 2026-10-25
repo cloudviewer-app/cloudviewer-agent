@@ -1,4 +1,4 @@
-# Cloud Viewer monitoring agent: the pinned Vector binary (from the `vector`
+# Vaicoa monitoring agent: the pinned Vector binary (from the `vector`
 # package this package depends on) running our rendered config.
 #
 # Runs unprivileged as the vector user the dependency creates — it is already
@@ -7,8 +7,8 @@
 # checkpoints out of /var/lib/vector so a customer's own Vector instance can
 # run alongside without either corrupting the other's state.
 [Unit]
-Description=Cloud Viewer monitoring agent (Vector)
-Documentation=https://cloudviewer.app
+Description=Vaicoa monitoring agent (Vector)
+Documentation=https://vaicoa.com/app/docs/
 After=network-online.target
 Wants=network-online.target
 # Installed inert: enrollment (`cloudviewer-agent enroll`) creates agent.env

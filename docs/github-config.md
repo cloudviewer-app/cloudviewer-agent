@@ -24,8 +24,8 @@ documents the setting. §8 lists audit commands to verify the live state.
 
 ```sh
 gh repo edit cloudviewer-app/cloudviewer-agent \
-  --description "Cloud Viewer monitoring agent — installer, deb/rpm packaging, container image, and Helm chart for the Vector-based agent" \
-  --homepage "https://cloudviewer.app" \
+  --description "Vaicoa monitoring agent — installer, deb/rpm packaging, container image, and Helm chart for the Vector-based agent" \
+  --homepage "https://vaicoa.com/app/" \
   --add-topic vector --add-topic observability --add-topic monitoring \
   --add-topic hetzner --add-topic agent
 ```

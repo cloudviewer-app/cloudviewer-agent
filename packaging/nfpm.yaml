@@ -18,15 +18,15 @@ platform: linux
 version: ${VERSION}
 section: admin
 priority: optional
-maintainer: Cloud Viewer <support@cloudviewer.app>
+maintainer: Vaicoa <support@mitjamartini.com>
 description: |
-  Cloud Viewer monitoring agent (Vector-based).
-  Enrollment, config polling, and job reporting for cloudviewer.app.
+  Vaicoa monitoring agent (Vector-based).
+  Enrollment, config polling, and job reporting for the Vaicoa app.
   The collector itself is the upstream `vector` package; this package adds
-  the Cloud Viewer identity, units, and helpers around it. Installed inert:
+  the Vaicoa identity, units, and helpers around it. Installed inert:
   activate with `cloudviewer-agent enroll --token <agent_token>`.
-vendor: Cloud Viewer
-homepage: https://cloudviewer.app
+vendor: Vaicoa
+homepage: https://vaicoa.com/app/
 license: Apache-2.0
 
 # `>=` rather than `=`: an exact pin would force a lockstep release of this

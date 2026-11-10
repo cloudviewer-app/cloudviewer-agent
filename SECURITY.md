@@ -10,9 +10,9 @@ code it did not opt into are the ones we care most about.
 Preferred: **GitHub private vulnerability reporting** on this repository
 (Security tab → "Report a vulnerability").
 
-Alternatively: **security@cloudviewer.app** — the same disclosure contact
-as the Cloud Viewer product's `security.txt` and the
-[monorepo security policy](https://github.com/mitja/cloudviewer/blob/main/SECURITY.md).
+Alternatively: **security@mitjamartini.com** — the same disclosure contact
+as the Cloud Viewer product's [`security.txt`](https://cloudviewer.app/.well-known/security.txt)
+and its [security page](https://cloudviewer.app/security/).
 If you want to encrypt, ask for a key in a first, contentless mail.
 
 Please include what you found, how to reproduce it, what an attacker

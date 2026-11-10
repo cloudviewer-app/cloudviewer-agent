@@ -1,0 +1,17 @@
+[Unit]
+Description=Report per-app container health to Cloud Viewer
+Documentation=https://cloudviewer.app/docs/recipes/paas-hosts/
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Options go here, e.g. --max-jobs 8 --ignore '^(coolify|dokploy)'
+ExecStart=/usr/local/bin/cloudviewer-paas-report
+# Needs the Docker socket and /etc/cloudviewer-agent/agent.env; it writes
+# only its restart-count state.
+StateDirectory=cloudviewer-paas-report
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true

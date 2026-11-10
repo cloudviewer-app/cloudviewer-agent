@@ -183,6 +183,11 @@ on a single-node cluster — one token across a DaemonSet reports every
 node as the same server. Details and caveats:
 `charts/cloudviewer-agent/README.md`.
 
+### Apps on a PaaS host (Dokku, Kamal, Coolify, Dokploy, Compose)
+
+[`contrib/paas-report`](contrib/paas-report/) reports every app on a Docker-based PaaS host
+as a job: one script and a systemd timer, no PaaS API token. See its README.
+
 ### Other platforms
 
 No apt/dnf (Alpine, NixOS, …): use the container image above, or install

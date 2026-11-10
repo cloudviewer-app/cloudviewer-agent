@@ -1,0 +1,423 @@
+#!/bin/sh
+# cloudviewer-paas-report — per-app health of a Docker-based PaaS host,
+# sent to Cloud Viewer as job reports.
+#
+# Works on Dokku, Kamal, Coolify, Dokploy, Docker Swarm and plain
+# Docker Compose hosts. It reads `docker inspect` only (no PaaS API, no
+# credentials besides the server's own agent token), groups containers
+# into apps by the labels each platform already sets, and sends one
+# batched POST /v1/ingest/job with one job per app. Each app then shows
+# on the server's Jobs section in the app, and the existing
+# "Job failed" / "Job stale" alerts cover it.
+#
+# Usage:
+#   cloudviewer-paas-report [report] [options]   send (default)
+#   cloudviewer-paas-report status   [options]   print the table, send nothing
+#   cloudviewer-paas-report domains              list hostnames for uptime checks
+#   cloudviewer-paas-report retire APP...        delete the jobs of removed apps
+#
+# Options:
+#   --dry-run              print the JSON body instead of sending it
+#   --prefix STR           job-name prefix                     (default: app-)
+#   --max-jobs N           job slots this script may use, 1-16 (default: 12)
+#   --max-age DUR          freshness budget per job, e.g. 900, 15m, 1h
+#                                                              (default: 15m)
+#   --restart-threshold N  restarts between two runs that count as a loop
+#                                                              (default: 3)
+#   --ignore REGEX         skip apps whose name matches (extended regex)
+#   --env-file PATH        agent env file  (default: /etc/cloudviewer-agent/agent.env)
+#   --token-file PATH      read the agent token from this file instead
+#   --facade-url URL       override CV_AGENT_FACADE_URL
+#   --state-dir PATH       restart-count state (default: /var/lib/cloudviewer-paas-report)
+#
+# Exit codes reported per app (worst component wins):
+#    0  ok — every component has a running container (healthy or no healthcheck),
+#       or the app was stopped on purpose
+#   10  unhealthy — a running container's HEALTHCHECK reports unhealthy
+#   20  restart loop — a container is restarting, or restarted at least
+#       --restart-threshold times since the previous run
+#   30  down — a component has no running container and at least one of its
+#       containers crashed (non-zero exit, OOM-killed, or dead)
+#   40  gone — the app had its own job, and now has no container at all.
+#       It stays 40 (and alerting) until someone decides: `retire APP` deletes
+#       the job and frees its slot. Nothing is deleted on a
+#       timer — an app whose containers vanished may be an outage.
+#
+# Container labels you can add yourself (any platform):
+#   cloudviewer.app=<name>    put this container into app <name>
+#   cloudviewer.ignore=true   leave this container out
+#
+# POSIX sh + awk + docker + curl. No jq.
+
+set -eu
+
+VERSION=2026.11.0
+ENV_FILE=/etc/cloudviewer-agent/agent.env
+TOKEN_FILE=""
+FACADE_URL=""
+PREFIX="app-"
+MAX_JOBS=12
+MAX_AGE=15m
+RESTART_THRESHOLD=3
+IGNORE_RE=""
+STATE_DIR=/var/lib/cloudviewer-paas-report
+DRY_RUN=0
+CMD=report
+
+die() { printf 'cloudviewer-paas-report: %s\n' "$*" >&2; exit 2; }
+warn() { printf 'cloudviewer-paas-report: %s\n' "$*" >&2; }
+
+case "${1:-}" in
+    report|status|domains|retire) CMD=$1; shift ;;
+    -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --version) echo "$VERSION"; exit 0 ;;
+esac
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1 ;;
+        --prefix) PREFIX=${2?}; shift ;;
+        --max-jobs) MAX_JOBS=${2?}; shift ;;
+        --max-age) MAX_AGE=${2?}; shift ;;
+        --restart-threshold) RESTART_THRESHOLD=${2?}; shift ;;
+        --ignore) IGNORE_RE=${2?}; shift ;;
+        --env-file) ENV_FILE=${2?}; shift ;;
+        --token-file) TOKEN_FILE=${2?}; shift ;;
+        --facade-url) FACADE_URL=${2%/}; shift ;;
+        --state-dir) STATE_DIR=${2?}; shift ;;
+        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) die "unknown option: $1 (see --help)" ;;
+        *) [ "$CMD" = retire ] || die "unexpected argument: $1 (see --help)"
+           RETIRE_APPS="${RETIRE_APPS:-} $1" ;;
+    esac
+    shift
+done
+
+case "$MAX_JOBS" in ''|*[!0-9]*) die "--max-jobs must be a number" ;; esac
+[ "$MAX_JOBS" -ge 1 ] && [ "$MAX_JOBS" -le 16 ] || die "--max-jobs must be 1-16 (the per-server job cap is 16)"
+case "$RESTART_THRESHOLD" in ''|*[!0-9]*) die "--restart-threshold must be a number" ;; esac
+
+# 900 | 15m | 2h | 1d -> seconds
+to_seconds() {
+    case "$1" in
+        *[!0-9smhd]*|'') return 1 ;;
+        *s) echo "${1%s}" ;;
+        *m) echo $(( ${1%m} * 60 )) ;;
+        *h) echo $(( ${1%h} * 3600 )) ;;
+        *d) echo $(( ${1%d} * 86400 )) ;;
+        *) echo "$1" ;;
+    esac
+}
+MAX_AGE_S=$(to_seconds "$MAX_AGE") || die "--max-age: use e.g. 900, 15m, 2h"
+[ "$MAX_AGE_S" -gt 0 ] || die "--max-age must be > 0"
+
+command -v docker >/dev/null 2>&1 || die "docker not found"
+docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
+    die "cannot reach the Docker daemon (run as root or a member of the docker group)"
+
+# ---------------------------------------------------------------------------
+# One docker inspect for every container; one tab-separated line each.
+# ---------------------------------------------------------------------------
+L() { printf '{{index .Config.Labels "%s"}}' "$1"; }
+# .State.Health is absent without a HEALTHCHECK, and newer Docker versions
+# refuse a template that touches a missing key, so it is read from the JSON.
+FMT="{{.Id}}	{{.Name}}	{{.State.Status}}	{{.State.ExitCode}}	{{.State.OOMKilled}}	{{.RestartCount}}	{{json .State}}"
+for l in cloudviewer.app cloudviewer.ignore \
+         com.dokku.app-name com.dokku.process-type \
+         service role destination \
+         coolify.managed coolify.resourceName \
+         com.docker.compose.project com.docker.compose.service \
+         com.docker.swarm.service.name com.docker.stack.namespace; do
+    FMT="$FMT	$(L "$l")"
+done
+
+inspect_all() {
+    ids=$(docker ps -aq) || die "docker ps failed (is the daemon running, are you root/in the docker group?)"
+    [ -n "$ids" ] || return 0
+    # shellcheck disable=SC2086
+    docker inspect --format "$FMT" $ids
+}
+
+# ---------------------------------------------------------------------------
+# domains: hostnames from Traefik/Caddy labels, Dokku and kamal-proxy.
+# ---------------------------------------------------------------------------
+if [ "$CMD" = domains ]; then
+    {
+        ids=$(docker ps -q)
+        if [ -n "$ids" ]; then
+            # shellcheck disable=SC2086
+            docker inspect --format '{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{"\n"}}{{end}}' $ids |
+                awk -F= '
+                    $1 ~ /^traefik\.http\.routers\..*\.rule$/ {
+                        s = substr($0, index($0, "=") + 1)
+                        while (match(s, /Host(SNI)?\(([^)]*)\)/)) {
+                            h = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+                            sub(/^Host(SNI)?\(/, "", h); sub(/\)$/, "", h)
+                            n = split(h, a, ",")
+                            for (i = 1; i <= n; i++) { gsub(/[`" ]/, "", a[i]); if (a[i] != "") print a[i] }
+                        }
+                    }
+                    $1 ~ /^caddy(_[0-9]+)?$/ {
+                        s = substr($0, index($0, "=") + 1); n = split(s, a, /[ ,]+/)
+                        for (i = 1; i <= n; i++) { h = a[i]; sub(/^https?:\/\//, "", h); sub(/[:\/].*$/, "", h); if (h ~ /\./) print h }
+                    }'
+        fi
+        if command -v dokku >/dev/null 2>&1; then
+            dokku --quiet apps:list 2>/dev/null | while read -r app; do
+                dokku domains:report "$app" --domains-app-vhosts 2>/dev/null | tr ' ' '\n'
+            done
+        fi
+        if docker ps --format '{{.Names}}' | grep -qx kamal-proxy; then
+            docker exec kamal-proxy kamal-proxy list 2>/dev/null |
+                awk 'NR > 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[a-z0-9.-]+\.[a-z]+$/ && $i !~ /:/) print $i }'
+        fi
+    } | grep -E '^[A-Za-z0-9*.-]+\.[A-Za-z]{2,}$' | sort -u
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Group into apps and grade them.
+# ---------------------------------------------------------------------------
+mkdir -p "$STATE_DIR" 2>/dev/null || STATE_DIR=${TMPDIR:-/tmp}
+STATE="$STATE_DIR/restarts"
+[ -f "$STATE" ] || : > "$STATE"
+NEWSTATE="$STATE.new.$$"
+TABLE="$STATE_DIR/table.$$"
+trap 'rm -f "$NEWSTATE" "$TABLE"' EXIT
+
+# A Dokploy host is a Swarm host whose control plane is called dokploy.
+SWARM_PLATFORM=swarm
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dokploy'; then SWARM_PLATFORM=dokploy; fi
+
+inspect_all | awk -F '\t' \
+    -v state="$STATE" -v newstate="$NEWSTATE" -v thr="$RESTART_THRESHOLD" \
+    -v ignore="$IGNORE_RE" -v swarm_platform="$SWARM_PLATFORM" '
+BEGIN { while ((getline line < state) > 0) { split(line, p, " "); prev[p[1]] = p[2] } }
+{
+    for (i = 8; i <= NF; i++) if ($i == "<no value>") $i = ""
+    id = $1; name = $2; sub(/^\//, "", name)
+    st = $3; ec = $4 + 0; oom = $5; rc = $6 + 0
+    # Inside JSON strings quotes are escaped, so the first bare "Status":"..."
+    # after "Health":{ is the health status.
+    health = ""; js = $7; h = index(js, "\"Health\":{")
+    if (h > 0 && match(substr(js, h), /"Status":"[a-z]+"/)) health = substr(substr(js, h), RSTART + 10, RLENGTH - 11)
+    cv_app = $8; cv_ignore = $9
+    dk_app = $10; dk_ptype = $11
+    km_service = $12; km_role = $13; km_dest = $14
+    cl_managed = $15; cl_res = $16
+    cp_proj = $17; cp_svc = $18
+    sw_svc = $19; sw_ns = $20
+
+    print id, rc > newstate
+    if (cv_ignore == "true" || cv_ignore == "1") next
+
+    comp = name
+    if (cv_app != "") {
+        platform = "label"; app = cv_app
+        comp = (cp_svc != "" ? cp_svc : (km_role != "" ? km_role : (dk_ptype != "" ? dk_ptype : (sw_svc != "" ? sw_svc : name))))
+    } else if (dk_app != "") {
+        platform = "dokku"; app = dk_app; comp = (dk_ptype != "" ? dk_ptype : "web")
+    } else if (km_service != "" && km_role != "") {
+        platform = "kamal"; app = km_service (km_dest != "" ? "-" km_dest : ""); comp = km_role
+    } else if (sw_svc != "") {
+        platform = swarm_platform
+        if (sw_ns != "") { app = sw_ns; comp = sw_svc } else { app = sw_svc; comp = sw_svc }
+    } else if (cp_proj != "") {
+        if (cl_managed == "true") { platform = "coolify"; app = (cl_res != "" ? cl_res : cp_proj) }
+        else { platform = "compose"; app = cp_proj }
+        comp = cp_svc
+    } else if (name == "kamal-proxy") {
+        platform = "kamal"; app = "kamal-proxy"
+    } else {
+        platform = "docker"; app = name
+    }
+    if (ignore != "" && app ~ ignore) next
+
+    key = app SUBSEP comp
+    if (!(app in plat)) { plat[app] = platform; napps++ }
+    comps[key] = 1
+    total[key]++
+
+    if (st == "running") {
+        running[key]++
+        if (health == "unhealthy") unhealthy[key]++
+    }
+    if (st == "restarting") restarting[key]++
+    if ((id in prev) && rc - prev[id] >= thr && thr > 0) restarting[key]++
+    if (st == "dead" || (st == "exited" && (oom == "true" || (ec != 0 && ec != 137 && ec != 143))))
+        crashed[key]++
+}
+END {
+    for (key in comps) {
+        split(key, k, SUBSEP); app = k[1]; comp = k[2]
+        s = 0; why = "ok"
+        if (unhealthy[key]) { s = 10; why = comp ": unhealthy" }
+        if (restarting[key]) { s = 20; why = comp ": restart loop" }
+        if (!running[key] && crashed[key] && !restarting[key]) { s = 30; why = comp ": down" }
+        if (!(app in grade) || s > grade[app]) { grade[app] = s; reason[app] = why }
+        if (s == 0 && !(app in reason)) reason[app] = "ok"
+        n[app]++
+        if (running[key]) up[app]++
+    }
+    for (app in plat) printf "%s\t%s\t%d\t%d/%d\t%s\n", app, plat[app], grade[app], up[app] + 0, n[app], reason[app]
+}' | sort > "$TABLE"
+
+mv "$NEWSTATE" "$STATE" 2>/dev/null || true
+
+# job_name: [a-z0-9][a-z0-9-_.]{0,63}
+jobname() {
+    # ASCII on purpose: the job_name charset is [a-z0-9._-].
+    # shellcheck disable=SC2018,SC2019
+    printf '%s%s' "$PREFIX" "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._\n-' '-' |
+        sed -e 's/^[^a-z0-9]*//' -e 's/--*/-/g' | cut -c1-64 | sed 's/[^a-z0-9]*$//'
+}
+
+if [ "$CMD" = status ]; then
+    printf '%-28s %-9s %-6s %-6s %s\n' JOB PLATFORM CODE COMPS DETAIL
+    while IFS="$(printf '\t')" read -r app platform code comps why; do
+        printf '%-28s %-9s %-6s %-6s %s\n' "$(jobname "$app")" "$platform" "$code" "$comps" "$why"
+    done < "$TABLE"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Assign job slots. The server holds at most 16 jobs, shared with every
+# other reporter, and a job name keeps its slot until the job is deleted.
+# Slots are therefore sticky: an app that got its own job keeps it (state
+# file "assigned", in order of first sight), a new app gets one while fewer
+# than --max-jobs - 1 are assigned, and every app after that is folded into
+# "<prefix>other". Adding or removing an app never renames another app's job.
+# An app with a slot but no container is reported as gone (40) until
+# `retire` deletes its job, which frees the slot for the next new app.
+# ---------------------------------------------------------------------------
+napps=$(wc -l < "$TABLE" | tr -d ' ')
+if [ "$napps" -eq 0 ]; then
+    warn "no containers found; nothing to report"
+    exit 0
+fi
+
+ASSIGNED="$STATE_DIR/assigned"
+CONFIRMED="$STATE_DIR/confirmed"
+[ -f "$ASSIGNED" ] || : > "$ASSIGNED"
+[ -f "$CONFIRMED" ] || : > "$CONFIRMED"
+JOBS="$STATE_DIR/jobs.$$"
+NEWASSIGNED="$ASSIGNED.new.$$"
+trap 'rm -f "$NEWSTATE" "$TABLE" "$JOBS" "$NEWASSIGNED" "$JOBS.ok"' EXIT
+
+awk -F '\t' -v max="$MAX_JOBS" -v assigned="$ASSIGNED" -v newassigned="$NEWASSIGNED" '
+    BEGIN { while ((getline a < assigned) > 0) if (a != "") { slot[a] = 1; order[++n] = a } }
+    { app[NR] = $1; code[NR] = $3 }
+    END {
+        for (i = 1; i <= NR; i++) {
+            a = app[i]
+            if (!(a in slot) && n < max - 1) { slot[a] = 1; order[++n] = a }
+            if (a in slot) print a "\t" code[i]
+            else { folded++; if (code[i] > worst) worst = code[i] }
+        }
+        if (folded) print "@other\t" worst + 0
+        for (i = 1; i <= n; i++) print order[i] > newassigned
+        if (folded) printf "%d app(s) folded into the \"other\" job\n", folded > "/dev/stderr"
+    }' "$TABLE" | while IFS="$(printf '\t')" read -r app code; do
+        [ "$app" = "@other" ] && app=other
+        printf '%s\t%s\n' "$(jobname "$app")" "$code"
+    done > "$JOBS.tmp"
+# Apps with a job of their own but no container: "gone" (40) until retired.
+awk -F '\t' 'FILENAME == ARGV[1] { present[$1] = 1; next } $0 != "" && !($0 in present)' \
+    "$TABLE" "$ASSIGNED" | while read -r app; do
+        printf '%s\t40\n' "$(jobname "$app")"
+    done >> "$JOBS.tmp"
+sort -u -t "$(printf '\t')" -k1,1 "$JOBS.tmp" > "$JOBS"; rm -f "$JOBS.tmp"
+
+# JSON from "name<TAB>code" lines.
+body() {
+    awk -F '\t' -v age="$MAX_AGE_S" '
+        BEGIN { printf "{\"reports\":[" }
+        { printf "%s{\"job_name\":\"%s\",\"exit_code\":%d,\"max_age_seconds\":%d}", (NR > 1 ? "," : ""), $1, $2, age }
+        END { printf "]}\n" }' "$1"
+}
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    body "$JOBS"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Send.
+# ---------------------------------------------------------------------------
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+fi
+TOKEN=${CV_AGENT_TOKEN:-}
+if [ -n "$TOKEN_FILE" ]; then TOKEN=$(tr -d ' \r\n' < "$TOKEN_FILE"); fi
+[ -n "$TOKEN" ] || die "no agent token (CV_AGENT_TOKEN in $ENV_FILE, or --token-file)"
+URL=${FACADE_URL:-${CV_AGENT_FACADE_URL:-https://api.cloudviewer.app}}
+URL=${URL%/}
+
+command -v curl >/dev/null 2>&1 || die "curl not found"
+
+RESP="$STATE_DIR/resp.$$"
+
+# retire APP...: a person (or a real "app deleted" hook, such as Dokku's
+# post-delete trigger) decided these apps are gone. DELETE /v1/ingest/job/
+# {name}: 204 deleted, 404 job_not_found already gone; both
+# free the slot here too.
+if [ "$CMD" = retire ]; then
+    [ -n "${RETIRE_APPS:-}" ] || die "retire: name at least one app (as in the JOB column of status, without the prefix)"
+    failed=0
+    for app in $RETIRE_APPS; do
+        name=$(jobname "${app#"$PREFIX"}")
+        rc=$(curl -sS -o "$RESP" -w '%{http_code}' -X DELETE "$URL/v1/ingest/job/$name" \
+            -H "X-Agent-Token: $TOKEN" -H "User-Agent: cloudviewer-paas-report/$VERSION" \
+            --max-time 20 || echo 000)
+        if [ "$rc" = 204 ] || { [ "$rc" = 404 ] && grep -q job_not_found "$RESP" 2>/dev/null; }; then
+            [ "$rc" = 204 ] && echo "retired $name" || echo "$name: no such job (already gone)"
+            while IFS= read -r a; do
+                [ "$(jobname "$a")" = "$name" ] || printf '%s\n' "$a"
+            done < "$ASSIGNED" > "$ASSIGNED.new" && mv "$ASSIGNED.new" "$ASSIGNED"
+            awk -v n="$name" '$0 != n' "$CONFIRMED" > "$CONFIRMED.new" && mv "$CONFIRMED.new" "$CONFIRMED"
+        else
+            warn "could not retire $name: HTTP $rc $(head -c 200 "$RESP" 2>/dev/null)"
+            failed=1
+        fi
+        rm -f "$RESP"
+    done
+    exit "$failed"
+fi
+post() {
+    body "$1" | curl -sS -o "$RESP" -w '%{http_code}' -X POST "$URL/v1/ingest/job" \
+        -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
+        -H "User-Agent: cloudviewer-paas-report/$VERSION" \
+        --max-time 20 --data-binary @-
+}
+send() {
+    code=$(post "$1" || echo 000)
+    case "$code" in
+        429|503|000) sleep 30; code=$(post "$1" || echo 000) ;;
+    esac
+}
+
+send "$JOBS"
+case "$code" in
+    2??)
+        mv "$NEWASSIGNED" "$ASSIGNED"
+        cut -f1 "$JOBS" | cat - "$CONFIRMED" | sort -u > "$CONFIRMED.new" && mv "$CONFIRMED.new" "$CONFIRMED"
+        rm -f "$RESP"; exit 0 ;;
+    422)
+        resp=$(head -c 300 "$RESP" 2>/dev/null); rm -f "$RESP"
+        case "$resp" in
+            *job_limit_reached*) ;;
+            *) die "422: rejected: $resp" ;;
+        esac
+        # New job names do not fit next to the server's other jobs, and the
+        # facade rejects the whole batch. Resend only the jobs it already
+        # holds, so they stay fresh, and name the apps that were left out.
+        awk -F '\t' 'FILENAME == ARGV[1] { ok[$1] = 1; next } $1 in ok' "$CONFIRMED" "$JOBS" > "$JOBS.ok"
+        skipped=$(awk -F '\t' 'FILENAME == ARGV[1] { ok[$1] = 1; next } !($1 in ok) { printf "%s ", $1 }' "$CONFIRMED" "$JOBS")
+        if [ -s "$JOBS.ok" ]; then send "$JOBS.ok"; fi
+        rm -f "$RESP"
+        die "the server's 16-job limit is reached; not reported: ${skipped}(free job slots or lower --max-jobs)" ;;
+    401) rm -f "$RESP"; die "401: the agent token was rejected" ;;
+    403) rm -f "$RESP"; die "403: job reports need Pro or Team" ;;
+    *) rm -f "$RESP"; die "report failed: HTTP $code" ;;
+esac
